@@ -231,7 +231,7 @@ jobs:
           tar -xJf /tmp/node-v22.14.0-linux-x64.tar.xz -C /usr/local --strip-components=1
           node --version
           npm --version
-          ldd --version | head -n 1
+          ldd --version
           pkg-config --modversion webkit2gtk-4.1
           patchelf --version
 
