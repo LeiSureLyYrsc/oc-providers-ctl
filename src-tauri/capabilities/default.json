@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the single bundled main window. No remote URLs and no filesystem, HTTP or shell plugin commands are granted.",
+  "windows": ["main"],
+  "platforms": ["windows", "linux"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "allow-scan-configs",
+    "allow-load-config",
+    "allow-preview-changes",
+    "allow-apply-changes",
+    "allow-restore-backup",
+    "allow-fetch-catalog",
+    "allow-match-models",
+    "allow-fetch-provider-models",
+    "allow-pick-config-path"
+  ]
+}

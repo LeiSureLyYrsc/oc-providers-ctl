@@ -1,0 +1,285 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Tests and version preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Require tag, app and package versions to match
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.GITHUB_REF_NAME;
+            const appVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+            const pkgVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            if (tag !== `v${appVersion}`) {
+              console.error(`Tag ${tag} does not match tauri version ${appVersion}`);
+              process.exit(1);
+            }
+            if (pkgVersion !== appVersion) {
+              console.error(`package.json version ${pkgVersion} does not match tauri version ${appVersion}`);
+              process.exit(1);
+            }
+            console.log(`Release ${tag} corresponds to ${appVersion}`);
+          '
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Format check (core only)
+        run: cargo fmt -p oc-providers-core -- --check
+
+      - name: Clippy (core only)
+        run: cargo clippy -p oc-providers-core --all-targets --locked -- -D warnings
+
+      - name: Tests (core only)
+        run: cargo test -p oc-providers-core --locked
+
+  build-windows:
+    name: Windows x64 / NSIS
+    needs: preflight
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Verify Cargo.lock is current
+        shell: bash
+        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Build NSIS installer
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: "."
+          args: "--bundles nsis"
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-x64-nsis
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Linux x64 / deb + AppImage
+    needs: preflight
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - name: Install Ubuntu 22.04 baseline toolchain and Node.js
+        working-directory: /tmp
+        run: |
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            squashfs-tools \
+            wget \
+            xdg-utils \
+            xz-utils
+          NODE_VERSION=22.14.0
+          curl --proto '=https' --tlsv1.2 -fsSLo /tmp/node-v22.14.0-linux-x64.tar.xz \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fsSLo /tmp/SHASUMS256.txt \
+            "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+          (cd /tmp && grep -E "  node-v${NODE_VERSION}-linux-x64\\.tar\\.xz$" SHASUMS256.txt | sha256sum -c -)
+          tar -xJf /tmp/node-v22.14.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+          node --version
+          npm --version
+          ldd --version | head -n 1
+          pkg-config --modversion webkit2gtk-4.1
+          patchelf --version
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Verify Cargo.lock is current
+        shell: bash
+        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Build deb and AppImage bundles
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: "."
+          args: "--bundles deb,appimage"
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+
+      - name: Verify Linux bundles exist
+        run: |
+          set -euxo pipefail
+          test "$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
+          test "$(find target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' | wc -l)" -eq 1
+
+      - name: Upload deb bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-x64-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload AppImage bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-x64-appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: Draft release and checksums
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: release-assets
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Verify assets and write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          exe=(*.exe)
+          deb=(*.deb)
+          appimage=(*.AppImage)
+          if (( ${#exe[@]} != 1 || ${#deb[@]} != 1 || ${#appimage[@]} != 1 )); then
+            printf 'Expected 1 NSIS installer, 1 deb and 1 AppImage, got %d/%d/%d\n' \
+              "${#exe[@]}" "${#deb[@]}" "${#appimage[@]}" >&2
+            ls -la
+            exit 1
+          fi
+          sha256sum "${exe[@]}" "${deb[@]}" "${appimage[@]}" | LC_ALL=C sort -k 2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update draft GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-assets/*.exe release-assets/*.deb release-assets/*.AppImage release-assets/SHA256SUMS.txt)
+          notes="Draft release ${TAG}. Windows x64 NSIS installer and Linux x64 deb/AppImage. Verify assets with SHA256SUMS.txt. Builds are unsigned and may trigger OS warnings. The Linux bundles are built on an Ubuntu 22.04 baseline; AppImage portability is not guaranteed. No updater artifacts are included."
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' >/tmp/release-draft 2>/dev/null; then
+            if [[ "$(cat /tmp/release-draft)" != "true" ]]; then
+              echo "Release $TAG exists and is not a draft; refusing to overwrite." >&2
+              exit 1
+            fi
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "oc-providers-ctl ${TAG}" \
+              --notes "$notes" \
+              "${files[@]}"
+          fi
