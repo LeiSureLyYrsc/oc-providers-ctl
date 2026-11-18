@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { Workbench } from '../workbench/Workbench';
-import type { Backend } from '../ipc';
+import { App } from '../workbench/App';
+import type { Backend, ChangePreview, SourceDocument } from '../ipc';
 import { demoBackend } from '../demo/backend';
 import { SECOND_SOURCE, V2_NATIVE_SOURCE, makePreview, snapshotOf } from './fixtures';
 
@@ -32,85 +32,80 @@ function nativeStub(overrides: Partial<Backend> = {}): Backend {
   };
 }
 
-function nav(): HTMLElement {
-  return screen.getByRole('navigation', { name: '工作台视图' });
+function savebar(): HTMLElement {
+  return screen.getByRole('region', { name: '未保存的修改' });
 }
 
-function tray(): HTMLElement {
-  return screen.getByRole('region', { name: '变更台' });
+async function waitForDialogClosed(): Promise<void> {
+  await waitFor(() => expect(screen.queryAllByRole('dialog')).toHaveLength(0));
 }
 
-function draftCount(): number {
-  return tray().querySelectorAll('.draft-row').length;
+async function openModelEditor(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: /Upstream Coder/ }));
+  await user.click(await screen.findByRole('button', { name: '编辑' }));
+  const dialog = await screen.findByRole('dialog');
+  return dialog;
 }
 
-async function openModels() {
-  const user = userEvent.setup();
-  await user.click(within(nav()).getByRole('button', { name: /模型/ }));
-  return user;
-}
-
-async function stageContextValue(user: ReturnType<typeof userEvent.setup>, value: string) {
-  const input = (await waitFor(
-    () => screen.getByLabelText('上下文窗口 / CONTEXT'),
-  )) as HTMLInputElement;
+async function editContext(user: ReturnType<typeof userEvent.setup>, value: string) {
+  const dialog = await openModelEditor(user);
+  const input = within(dialog).getByLabelText('上下文长度') as HTMLInputElement;
   await user.clear(input);
   await user.type(input, value);
-  const field = input.closest('.field-editor') as HTMLElement;
-  await user.click(within(field).getByRole('button', { name: '设为草稿' }));
+  await user.click(within(dialog).getByRole('button', { name: '保存修改' }));
+  await waitForDialogClosed();
+  await waitFor(() => expect(savebar()).toBeInTheDocument());
+}
+
+async function addSupplier(user: ReturnType<typeof userEvent.setup>, id: string) {
+  await user.click(await screen.findByRole('button', { name: /^添加$/ }));
+  const dialog = await screen.findByRole('dialog');
+  const idInput = within(dialog).getByLabelText('标识') as HTMLInputElement;
+  await user.clear(idInput);
+  await user.type(idInput, id);
+  await user.click(within(dialog).getByRole('button', { name: '添加' }));
+  await waitForDialogClosed();
+  await waitFor(() => expect(within(savebar()).getByText(/项修改待保存/)).toBeInTheDocument());
 }
 
 describe('demo mode', () => {
-  it('shows the explicit demo banner and never reports a disk write', async () => {
+  it('never invokes apply, even if the write control is clicked', async () => {
     const user = userEvent.setup();
-    render(<Workbench mode="demo" backend={demoBackend} />);
+    const applySpy = vi.spyOn(demoBackend, 'applyChanges');
+    render(<App mode="demo" backend={demoBackend} />);
 
     expect(await screen.findByRole('note')).toBeInTheDocument();
-    await user.click(within(nav()).getByRole('button', { name: /提供方/ }));
+    await addSupplier(user, 'demo-vendor');
 
-    const nameInput = (await waitFor(
-      () => screen.getByLabelText('显示名 / NAME'),
-    )) as HTMLInputElement;
-    await user.clear(nameInput);
-    await user.type(nameInput, '演示改名');
-    const field = nameInput.closest('.field-editor') as HTMLElement;
-    await waitFor(() => expect(nameInput).toHaveValue('演示改名'));
-    await user.click(within(field).getByRole('button', { name: '设为草稿' }));
-    await waitFor(() => expect(draftCount()).toBe(1));
+    await user.click(within(savebar()).getByRole('button', { name: '保存…' }));
+    await screen.findByRole('dialog');
+    expect((await screen.findAllByText(/演示预览，不会写入磁盘/)).length).toBeGreaterThan(0);
 
-    await user.click(within(tray()).getByRole('button', { name: /预演变更/ }));
-    await waitFor(
-      () => expect(within(tray()).getByRole('button', { name: '应用到磁盘' })).toBeInTheDocument(),
-      { timeout: 5000 },
-    );
-    expect(tray().textContent).toContain('演示示意');
-    expect(within(tray()).getByRole('button', { name: '应用到磁盘' })).toBeDisabled();
-    expect(within(tray()).getByText(/绝不伪造写盘成功/)).toBeInTheDocument();
-    expect(screen.queryByText(/变更已写入磁盘/)).not.toBeInTheDocument();
-    expect(draftCount()).toBe(1);
+    const write = screen.getByRole('button', { name: '写入文件' });
+    expect(write).toBeDisabled();
+    await user.click(write);
+    expect(applySpy).not.toHaveBeenCalled();
+    expect(screen.queryByText('修改已写入文件。')).not.toBeInTheDocument();
   });
 });
 
 describe('native mode', () => {
-  it('scans, emits keyed edits, previews, and applies only after confirmation', async () => {
+  it('emits the V2 map-keyed edit and applies only after confirmation', async () => {
+    const user = userEvent.setup();
     const backend = nativeStub();
-    render(<Workbench mode="native" backend={backend} />);
+    render(<App mode="native" backend={backend} />);
+
     await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalledWith(null));
     expect(screen.queryByRole('note')).not.toBeInTheDocument();
 
-    const user = await openModels();
-    await stageContextValue(user, '262144');
+    await editContext(user, '262144');
+    await user.click(within(savebar()).getByRole('button', { name: '保存…' }));
 
-    expect(
-      within(tray()).getByText('providers.gateway.models["upstream/coder"].limit.context'),
-    ).toBeInTheDocument();
-
-    await user.click(within(tray()).getByRole('button', { name: /预演变更/ }));
     await waitFor(() => expect(backend.previewChanges).toHaveBeenCalledTimes(1));
-    const previewCall = (backend.previewChanges as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(previewCall[0]).toBe(V2_NATIVE_SOURCE.path);
-    expect(previewCall[1]).toBe(V2_NATIVE_SOURCE.hash);
-    expect(previewCall[2]).toEqual([
+    const [path, hash, edits] = (backend.previewChanges as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(path).toBe(V2_NATIVE_SOURCE.path);
+    expect(hash).toBe(V2_NATIVE_SOURCE.hash);
+    expect(edits).toEqual([
       {
         op: 'set',
         path: ['providers', 'gateway', 'models', 'upstream/coder', 'limit', 'context'],
@@ -118,72 +113,128 @@ describe('native mode', () => {
       },
     ]);
 
-    await waitFor(() => expect(within(tray()).getByText(/后端预演/)).toBeInTheDocument());
-    await user.click(within(tray()).getByRole('button', { name: '应用到磁盘' }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(V2_NATIVE_SOURCE.path)).toBeInTheDocument();
+    const write = await screen.findByRole('button', { name: '写入文件' });
     expect(backend.applyChanges).not.toHaveBeenCalled();
-    await user.click(within(dialog).getByRole('button', { name: '应用并写入' }));
+    await user.click(write);
     await waitFor(() => expect(backend.applyChanges).toHaveBeenCalledWith('preview-1'));
-    await waitFor(() => expect(within(tray()).getByText(/变更已写入磁盘/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByRole('status')).toHaveTextContent('已写入配置文件');
   });
 
-  it('asks before discarding drafts on rescan and keeps them when cancelled', async () => {
+  it('shows a new supplier as pending until it is saved', async () => {
+    const user = userEvent.setup();
     const backend = nativeStub();
-    render(<Workbench mode="native" backend={backend} />);
+    render(<App mode="native" backend={backend} />);
     await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
 
-    const user = await openModels();
-    await stageContextValue(user, '4096');
-
-    await user.click(screen.getByRole('button', { name: '扫描全局' }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('重新扫描会丢弃草稿')).toBeInTheDocument();
-    expect(backend.scanConfigs).toHaveBeenCalledTimes(1);
-    await user.click(within(dialog).getByRole('button', { name: '取消' }));
-    expect(draftCount()).toBe(1);
-    expect(backend.scanConfigs).toHaveBeenCalledTimes(1);
+    await addSupplier(user, 'pending-vendor');
+    expect(screen.getAllByText(/待保存|项修改待保存/).length).toBeGreaterThan(0);
   });
 
-  it('binds the preview to the active file and rejects a mismatched target', async () => {
+  it('refuses to apply when the preview belongs to another file', async () => {
+    const user = userEvent.setup();
     const backend = nativeStub({
       previewChanges: vi.fn(async () => makePreview(SECOND_SOURCE.path)),
     });
-    render(<Workbench mode="native" backend={backend} />);
+    render(<App mode="native" backend={backend} />);
     await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
 
-    const user = await openModels();
-    await stageContextValue(user, '1024');
-    await user.click(within(tray()).getByRole('button', { name: /预演变更/ }));
+    await editContext(user, '1024');
+    await user.click(within(savebar()).getByRole('button', { name: '保存…' }));
     await waitFor(() => expect(backend.previewChanges).toHaveBeenCalled());
-    const [path, hash] = (backend.previewChanges as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(path).toBe(V2_NATIVE_SOURCE.path);
-    expect(hash).toBe(V2_NATIVE_SOURCE.hash);
 
-    // Switching files invalidates the preview and cannot apply it.
-    await user.selectOptions(screen.getByLabelText('选择当前配置源'), SECOND_SOURCE.path);
-    expect(tray().textContent ?? '').not.toContain('应用到磁盘');
+    await user.click(await screen.findByRole('button', { name: '写入文件' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/请重新保存预览/));
     expect(backend.applyChanges).not.toHaveBeenCalled();
   });
 
-  it('shows normalized V2 reasoning and rejects bare booleans in the advanced editor', async () => {
-    render(<Workbench mode="native" backend={nativeStub()} />);
-    await waitFor(() => expect(tray()).toBeInTheDocument());
-    const user = await openModels();
+  it('freezes edits while a preview is pending and ignores the stale reply', async () => {
+    const user = userEvent.setup();
+    const deferred: { resolve: (value: ChangePreview) => void } = { resolve: () => undefined };
+    const backend = nativeStub({
+      previewChanges: vi.fn(
+        () =>
+          new Promise<ChangePreview>((resolve) => {
+            deferred.resolve = resolve;
+          }),
+      ),
+    });
+    render(<App mode="native" backend={backend} />);
+    await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
 
-    const reasoning = (await waitFor(
-      () => screen.getByLabelText('推理 / REASONING JSON'),
-    )) as HTMLTextAreaElement;
-    expect(reasoning.value).toContain('"supported":true');
-    const summary = document.querySelector('.advanced-field .field-read-value')?.textContent ?? '';
-    expect(summary).toContain('支持');
-    expect(summary).toContain('档位 low/high');
-    expect(summary).toContain('预算 0–8192');
+    await editContext(user, '2000');
+    await user.click(within(savebar()).getByRole('button', { name: '保存…' }));
+    await waitFor(() => expect(backend.previewChanges).toHaveBeenCalledTimes(1));
 
-    await user.clear(reasoning);
-    await user.type(reasoning, 'true');
-    expect(screen.getByText(/不能是裸布尔值/)).toBeInTheDocument();
-    const reasoningField = reasoning.closest('.advanced-field') as HTMLElement;
-    expect(within(reasoningField).getByRole('button', { name: '设为草稿' })).toBeDisabled();
+    // While pending there is no successful preview state to write from.
+    const previewDialog = await waitFor(() => screen.getByRole('dialog', { name: '保存修改' }));
+    expect(within(previewDialog).getByText(/正在检查修改/)).toBeInTheDocument();
+    expect(within(previewDialog).queryByRole('button', { name: '写入文件' })).toBeNull();
+
+    // Switching files discards the pending preview; the late reply is ignored.
+    await user.click(within(previewDialog).getByRole('button', { name: '返回修改' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await user.selectOptions(screen.getByLabelText('选择配置文件'), SECOND_SOURCE.path);
+    const discard = await screen.findByRole('dialog');
+    await user.click(within(discard).getByRole('button', { name: '丢弃并继续' }));
+
+    deferred.resolve(makePreview(V2_NATIVE_SOURCE.path));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.queryByRole('button', { name: '写入文件' })).toBeNull();
+    expect(backend.applyChanges).not.toHaveBeenCalled();
+  });
+  it('asks before discarding when switching files with drafts', async () => {
+    const user = userEvent.setup();
+    const backend = nativeStub();
+    render(<App mode="native" backend={backend} />);
+    await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
+
+    await editContext(user, '4096');
+    await user.selectOptions(screen.getByLabelText('选择配置文件'), SECOND_SOURCE.path);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('放弃未保存的修改？')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: '取消' }));
+    expect(savebar()).toBeInTheDocument();
+  });
+
+  it('disambiguates config names and exposes file problems from the menu', async () => {
+    const user = userEvent.setup();
+    const broken: SourceDocument = {
+      ...SECOND_SOURCE,
+      writable: false,
+      warnings: ['这一项的结构无法安全识别。'],
+    };
+    const backend = nativeStub({
+      scanConfigs: vi.fn(async () => snapshotOf([V2_NATIVE_SOURCE, broken], 'C:\\work\\acme')),
+    });
+    render(<App mode="native" backend={backend} />);
+    await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
+
+    const select = screen.getByLabelText('选择配置文件');
+    const labels = Array.from(select.querySelectorAll('option')).map((option) => option.textContent);
+    expect(labels.some((label) => label?.includes('全局'))).toBe(true);
+    expect(labels.some((label) => label?.includes('second.jsonc'))).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    await user.click(screen.getByRole('menuitem', { name: /配置详情/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('这一项的结构无法安全识别。')).toBeInTheDocument();
+    expect(within(dialog).getByText(/只能查看/)).toBeInTheDocument();
+  });
+
+  it('disables editing on a read-only file', async () => {
+    const user = userEvent.setup();
+    const readOnly: SourceDocument = { ...V2_NATIVE_SOURCE, path: 'C:\\ro.jsonc', writable: false, warnings: [] };
+    const backend = nativeStub({
+      scanConfigs: vi.fn(async () => snapshotOf([V2_NATIVE_SOURCE, readOnly])),
+    });
+    render(<App mode="native" backend={backend} />);
+    await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /编辑供应商/ }).length).toBeGreaterThan(0),
+    );
+
+    await user.selectOptions(screen.getByLabelText('选择配置文件'), readOnly.path);
+    await waitFor(() => expect(screen.getByRole('button', { name: '添加' })).toBeDisabled());
   });
 });

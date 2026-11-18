@@ -8,7 +8,7 @@ import {
   demoScan,
 } from './fixtures';
 import { formatPath, resolveCurrentValue } from '../lib/paths';
-import { compactValue, maskSecretsInDiff, shortHash } from '../lib/format';
+import { compactValue, maskSecretsInDiff } from '../lib/format';
 
 let previewCounter = 0;
 
@@ -32,29 +32,22 @@ function buildDemoPreview(path: string, expectedHash: string, edits: Edit[]): Ch
   if (source.hash !== expectedHash) {
     throw new Error('配置源哈希与预演基准不一致。请重新扫描载入后再试。');
   }
-  const lines: string[] = [
-    '=== 演示示意差异 · 由草稿生成 ===',
-    `目标: ${path}`,
-    `基准哈希: ${shortHash(source.hash, 16)}`,
-    `编辑: ${edits.length} 处`,
-    '说明: 以下按草稿路径与当前 DTO 读取值生成示意，不是文件字节级 diff，也未读取磁盘。',
-    '',
-  ];
+  const lines: string[] = [];
   edits.forEach((edit) => {
     const rendered = formatPath(edit.path, source.dialect);
     const current = resolveCurrentValue(source, edit.path);
     if (edit.op === 'set') {
       if (current.found) {
         lines.push(`~ ${rendered}`);
-        lines.push(`- 读取  ${renderValue(current.value)}`);
+        lines.push(`- 现在  ${renderValue(current.value)}`);
       } else {
         lines.push(`+ ${rendered}`);
-        lines.push('- 读取  未设置');
+        lines.push('- 现在  未设置');
       }
-      lines.push(`+ 草稿  ${renderValue(edit.value)}`);
+      lines.push(`+ 保存后  ${renderValue(edit.value)}`);
     } else {
       lines.push(`- ${rendered}`);
-      lines.push(`  读取  ${current.found ? renderValue(current.value) : '未设置'}`);
+      lines.push(`  现在  ${current.found ? renderValue(current.value) : '未设置'}`);
     }
   });
   previewCounter += 1;
@@ -62,10 +55,7 @@ function buildDemoPreview(path: string, expectedHash: string, edits: Edit[]): Ch
     previewId: `demo-preview-${previewCounter}`,
     path,
     diff: maskSecretsInDiff(lines.join('\n')),
-    warnings: [
-      '演示预演由前端生成，仅用于查看草稿意图；不代表真实文件字节差异。',
-      '演示模式不会创建备份，也不会写入磁盘。',
-    ],
+    warnings: ['演示预览，不会写入磁盘；内容按草稿示意，不代表文件实际差异。'],
     editCount: edits.length,
   };
 }

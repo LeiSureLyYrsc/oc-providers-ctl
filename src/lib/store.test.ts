@@ -53,10 +53,17 @@ function startPreview(state: WorkbenchState, demo = false): WorkbenchState {
 
 function readyPreview(state: WorkbenchState, demo = false): WorkbenchState {
   const started = startPreview(state, demo);
+  const batch = batchFor(started, V2_NATIVE_SOURCE.path);
+  if (!batch) throw new Error('missing batch');
   return reducer(started, {
     type: 'PREVIEW_RESULT',
     result: makePreview(V2_NATIVE_SOURCE.path),
     demo,
+    request: {
+      path: V2_NATIVE_SOURCE.path,
+      sourceHash: batch.sourceHash,
+      revision: batch.revision,
+    },
   });
 }
 
@@ -115,9 +122,16 @@ describe('emitted native edits', () => {
 });
 
 describe('preview lifecycle safety', () => {
+  function currentRequest(state: WorkbenchState, path = V2_NATIVE_SOURCE.path) {
+    const batch = batchFor(state, path);
+    if (!batch) throw new Error('missing batch');
+    return { path, sourceHash: batch.sourceHash, revision: batch.revision };
+  }
+
   it('invalidates a ready preview when switching files and ignores the late result', () => {
     const ready = readyPreview(stageContext(baseState()));
     expect(ready.preview.status).toBe('ready');
+    const stale = currentRequest(ready);
     const switched = reducer(ready, {
       type: 'SELECT_SOURCE',
       path: SECOND_SOURCE.path,
@@ -128,6 +142,7 @@ describe('preview lifecycle safety', () => {
       type: 'PREVIEW_RESULT',
       result: makePreview(V2_NATIVE_SOURCE.path),
       demo: false,
+      request: stale,
     });
     expect(late.preview.status).toBe('idle');
     expect(late.preview.result).toBeUndefined();
@@ -136,14 +151,64 @@ describe('preview lifecycle safety', () => {
   it('invalidates an in-flight preview on source switch', () => {
     const loading = startPreview(stageContext(baseState()));
     expect(loading.preview.status).toBe('loading');
+    const stale = currentRequest(loading);
     const switched = reducer(loading, { type: 'SELECT_SOURCE', path: SECOND_SOURCE.path });
     expect(switched.preview.status).toBe('idle');
     const late = reducer(switched, {
       type: 'PREVIEW_RESULT',
       result: makePreview(V2_NATIVE_SOURCE.path),
       demo: false,
+      request: stale,
     });
     expect(late.preview.status).toBe('idle');
+  });
+
+  it('rejects a reply from file A while file B is still loading', () => {
+    // A is in flight.
+    const loadingA = startPreview(stageContext(baseState()));
+    const staleA = currentRequest(loadingA);
+
+    // User switches to B and starts a preview there.
+    const onB = reducer(loadingA, { type: 'SELECT_SOURCE', path: SECOND_SOURCE.path });
+    expect(onB.preview.status).toBe('idle');
+    const stagedB = reducer(onB, {
+      type: 'STAGE',
+      input: {
+        sourcePath: SECOND_SOURCE.path,
+        dialect: 'v1',
+        intent: 'create-provider',
+        path: ['provider', 'new-vendor'],
+        op: 'set',
+        value: { models: {} },
+        label: '新增供应商',
+      },
+    });
+    const loadingB = reducer(stagedB, {
+      type: 'PREVIEW_START',
+      demo: false,
+      request: currentRequest(stagedB, SECOND_SOURCE.path),
+    });
+    expect(loadingB.preview.status).toBe('loading');
+
+    // A's reply arrives late. It must not satisfy B's request.
+    const staleReply = reducer(loadingB, {
+      type: 'PREVIEW_RESULT',
+      result: makePreview(V2_NATIVE_SOURCE.path),
+      demo: false,
+      request: staleA,
+    });
+    expect(staleReply.preview.status).toBe('loading');
+    expect(staleReply.preview.result).toBeUndefined();
+
+    // B's own reply is accepted.
+    const goodReply = reducer(staleReply, {
+      type: 'PREVIEW_RESULT',
+      result: makePreview(SECOND_SOURCE.path),
+      demo: false,
+      request: currentRequest(loadingB, SECOND_SOURCE.path),
+    });
+    expect(goodReply.preview.status).toBe('ready');
+    expect(goodReply.preview.result?.path).toBe(SECOND_SOURCE.path);
   });
 
   it('freezes drafts while a preview is in flight', () => {
@@ -156,12 +221,14 @@ describe('preview lifecycle safety', () => {
 
   it('ignores a preview result after the draft revision changes', () => {
     const ready = readyPreview(stageContext(baseState()));
+    const stale = currentRequest(ready);
     const restaged = stageContext(ready, 300000);
     expect(restaged.preview.status).toBe('idle');
     const late = reducer(restaged, {
       type: 'PREVIEW_RESULT',
       result: makePreview(V2_NATIVE_SOURCE.path),
       demo: false,
+      request: stale,
     });
     expect(late.preview.status).toBe('idle');
   });

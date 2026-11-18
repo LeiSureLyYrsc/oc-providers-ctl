@@ -118,7 +118,7 @@ export type Action =
   | { type: 'CLEAR_BATCH'; sourcePath: string }
   | { type: 'DISCARD_ALL_DRAFTS' }
   | { type: 'PREVIEW_START'; demo: boolean; request: PreviewRequest }
-  | { type: 'PREVIEW_RESULT'; result: ChangePreview; demo: boolean }
+  | { type: 'PREVIEW_RESULT'; result: ChangePreview; demo: boolean; request: PreviewRequest }
   | { type: 'PREVIEW_ERROR'; message: string; request: PreviewRequest }
   | { type: 'APPLY_START' }
   | { type: 'APPLY_BLOCKED'; message: string }
@@ -522,7 +522,12 @@ export function reducer(state: WorkbenchState, action: Action): WorkbenchState {
       if (state.preview.status !== 'loading' || !state.preview.request) {
         return state;
       }
-      if (!previewRequestMatches(state, state.preview.request)) {
+      // Bind the result to the request that produced it. A stale reply from a
+      // previous file or draft revision must never satisfy the current one.
+      if (!sameRequest(state.preview.request, action.request)) {
+        return state;
+      }
+      if (!previewRequestMatches(state, action.request)) {
         return { ...state, preview: { status: 'idle' } };
       }
       return {
@@ -531,7 +536,7 @@ export function reducer(state: WorkbenchState, action: Action): WorkbenchState {
           status: 'ready',
           result: action.result,
           demo: action.demo,
-          request: state.preview.request,
+          request: action.request,
         },
       };
     }

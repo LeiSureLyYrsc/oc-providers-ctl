@@ -20,7 +20,7 @@
 
 ## 开发
 
-需要 Node.js 22 或更新版本、Rust stable，以及 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。Windows 需要 MSVC C++ 工具链和 WebView2；Linux 需要 WebKitGTK 4.1 开发包。
+需要 Node.js 22.12+（推荐使用当前受支持的 Node.js LTS）、Rust stable，以及 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。Windows 需要 MSVC C++ 工具链和 WebView2；Linux 需要 WebKitGTK 4.1 开发包。
 
 ```sh
 npm ci
@@ -30,8 +30,30 @@ npm run dev
 以上启动浏览器界面预览。原生桌面开发模式：
 
 ```sh
-npx tauri dev
+npm run tauri dev
 ```
+
+这两个启动入口是二选一：`tauri dev` 会自行启动 Vite，不要先运行一个占用 1420 端口的 `npm run dev`。若端口被占用，请关闭自己之前启动的预览进程后重试，不要批量终止 Node.js 或 Python 进程。
+
+可选：在**当前终端进程**设置以下变量，将扫描与备份限定到测试目录，用于验证原生开发模式而不接触真实全局配置。不要把这些测试覆盖变量当作 OpenCode 的配置发现规则。
+
+```powershell
+$env:OC_PROVIDERS_CTL_CONFIG_DIR = 'C:\path\to\fixtures\global'
+$env:OC_PROVIDERS_CTL_MANAGED_DIR = 'C:\path\to\fixtures\managed'
+$env:OC_PROVIDERS_CTL_BACKUP_DIR = 'C:\path\to\fixtures\backups'
+npm run tauri dev
+```
+
+配置目录需包含 `opencode.json` 或 `opencode.jsonc`。文件不存在时应用展示空状态，不会自动创建真实用户配置。退出测试终端后，上述进程环境覆盖随之消失。
+
+Rust 首次编译可能产生数 GB 缓存，请留足系统盘空间。可在当前终端将缓存指向其他磁盘后再启动；这不会移动源码或 OpenCode 配置：
+
+```powershell
+$env:CARGO_TARGET_DIR = 'I:\oc-providers-ctl-build\target'
+npm run tauri dev
+```
+
+路径和盘符按自己的机器调整。不要在编译或应用运行期间手动移动缓存，也不要用管理员权限启动来掩盖磁盘或权限问题。
 
 测试与静态检查：
 
@@ -48,11 +70,12 @@ cargo clippy -p oc-providers-core --all-targets -- -D warnings
 
 ## 安全操作流程
 
-1. 扫描配置或选择一个项目；确认发现的路径和格式。
-2. 选择要编辑的配置源。来自其他文件的设置可能仍覆盖该文件；本工具不把推导结果冒充运行时状态。
-3. 编辑模型参数或手动检索补全建议。未识别模型可以保留原 ID。
-4. 查看写入预览，确认目标文件及改动范围，再保存。
-5. 如需恢复，先确认没有外部改动，再使用本应用创建的备份。
+1. 顶部选择配置文件，左侧选择供应商，右侧管理模型。
+2. 点击「编辑」修改参数；添加、删除及补全同样先进入待保存状态。
+3. 底部点击「保存…」，检查目标文件和修改内容，再点击「写入文件」。
+4. 「更多操作」中可打开配置、包含项目目录、更新模型目录、查看配置详情或恢复备份。
+
+同名配置通过目录标签区分，完整路径可在配置详情和保存预览中查看。来自其他文件的设置可能仍覆盖当前文件；本工具不把文件读取结果冒充运行时状态。
 
 恢复备份与分享导出不是一回事：恢复备份可能保留原配置中的凭证，必须当作敏感文件。当前恢复入口只识别本次应用进程创建的最后一份备份，重启后不自动猜测备份归属；请勿将其视为长期版本历史。不要把配置、备份、日志或诊断输出未经检查就提交到 Git。
 
