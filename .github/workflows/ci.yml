@@ -124,6 +124,7 @@ jobs:
 
       - name: Windows core and backup ACL tests
         if: runner.os == 'Windows'
+        timeout-minutes: 10
         run: cargo test -p oc-providers-core --locked
 
       - name: Shell unit tests (state authorization and preview lifecycle)

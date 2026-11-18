@@ -393,6 +393,69 @@ async fn redirects_are_not_followed_and_do_not_forward_credentials() {
 }
 
 #[tokio::test]
+async fn mock_server_bounds_writes_to_a_client_that_stops_reading() {
+    // A client that sends a request then never reads must not block the mock
+    // server thread (and therefore `Drop`) indefinitely. Response writes are
+    // bounded by a socket write timeout and an accepted-socket lifetime cap.
+    use std::io::{Read, Write};
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![
+        // Larger than any plausible socket buffer, so the server-side write
+        // cannot complete while the client is not reading.
+        ResponseSpec::empty(200).with_body("x".repeat(64 * 1024 * 1024)),
+        ResponseSpec::json(r#"{"data":[{"id":"after"}]}"#),
+    ]);
+    let config_path = config_with(
+        &directory,
+        "stall.json",
+        "provider",
+        "stall",
+        &format!(
+            r#"{{ "npm": "@ai-sdk/openai-compatible", "options": {{ "baseURL": "{}/v1" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    // Raw client: request the huge response, read one tiny chunk, then stop
+    // reading while staying connected. The server-side write must time out.
+    let mut stalled_client =
+        std::net::TcpStream::connect(("127.0.0.1", server.addr().port())).expect("connect");
+    stalled_client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .ok();
+    stalled_client
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: mock\r\n\r\n")
+        .expect("write request");
+    let mut tiny = [0u8; 64];
+    assert!(
+        stalled_client.read(&mut tiny).unwrap_or(0) > 0,
+        "mock never started answering"
+    );
+
+    // A second client meanwhile must still reach the server once the first
+    // write attempt gives up, within a bounded time.
+    let started = std::time::Instant::now();
+    let following = fetch_inventory(&config_path, "stall").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "second request took {:?}",
+        started.elapsed()
+    );
+    let following = following.expect("server still serves after a stalled client");
+    assert_eq!(following.model_ids, vec!["after"]);
+    drop(stalled_client);
+
+    let started = std::time::Instant::now();
+    drop(server);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "mock server teardown took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
 async fn mock_server_serves_two_sequential_statuses_in_order() {
     let directory = tempfile::tempdir().expect("tempdir");
     let server = MockServer::start(vec![

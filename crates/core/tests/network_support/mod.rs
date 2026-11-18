@@ -8,6 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// Bounded wait for the client to finish sending its request head.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bounded wait for the kernel to accept response bytes. A client that stops
+/// reading must not be able to block the mock server thread indefinitely.
+const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long `Drop` waits for the server thread before detaching it.
+const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Hard lifetime bound for a mock server thread, even if a client vanishes.
+const SERVER_LIFETIME: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct ResponseSpec {
     pub status: u16,
@@ -77,6 +87,7 @@ pub struct MockServer {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     stop: Arc<AtomicBool>,
+    shutdown_listener: Option<TcpListener>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -117,28 +128,38 @@ impl MockServer {
 
         let thread_requests = Arc::clone(&requests);
         let thread_stop = Arc::clone(&stop);
+        // The shutdown handle owns its own listener clone, so `Drop` can
+        // unblock a pending `accept` on every platform without waiting for the
+        // polling loop to notice `stop`.
+        let shutdown_listener = listener.try_clone().ok();
+        // Bound the whole server lifetime so a hung client cannot leak the
+        // thread for the duration of the test run.
+        let deadline = Instant::now() + SERVER_LIFETIME;
         let join = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
             let mut next_response = 0usize;
             while next_response < responses.len()
-                && Instant::now() < deadline
                 && !thread_stop.load(Ordering::Relaxed)
+                && Instant::now() < deadline
             {
                 match listener.accept() {
                     Ok((mut stream, _peer)) => {
-                        // The listener socket is nonblocking, and on Windows a
-                        // socket inherited/accepted from a nonblocking listener
-                        // can still block. Reset the mode explicitly and use a
-                        // bounded retry for the request head so one slow or
-                        // aborted connection can never wedge the accept loop.
+                        // Bound every socket operation. A read timeout alone is
+                        // not enough: the oversized-response test makes the
+                        // client stop reading at its cap, so a large write would
+                        // block forever and `Drop` would join that thread until
+                        // the CI job is cancelled.
                         stream.set_nonblocking(false).ok();
-                        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                        stream.set_read_timeout(Some(REQUEST_TIMEOUT)).ok();
+                        stream.set_write_timeout(Some(RESPONSE_WRITE_TIMEOUT)).ok();
                         let Some(request) = read_request(&mut stream) else {
                             thread::sleep(Duration::from_millis(1));
                             continue;
                         };
                         let response = responses[next_response].clone();
                         next_response += 1;
+                        // Record the completed request regardless of how much of
+                        // the response the client was willing to read; the
+                        // remaining planned responses stay queued in order.
                         write_response(&mut stream, &response);
                         thread_requests.lock().unwrap().push(request);
                     }
@@ -168,6 +189,7 @@ impl MockServer {
             addr,
             requests,
             stop,
+            shutdown_listener,
             join: Some(join),
         }
     }
@@ -199,8 +221,27 @@ impl MockServer {
 impl Drop for MockServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Dropping a listener clone wakes a pending nonblocking `accept` with an
+        // error/poll wakeup instead of waiting for the next poll tick.
+        if let Some(listener) = self.shutdown_listener.take() {
+            let _ = listener.set_nonblocking(true);
+            // Bind-then-connect on the same port makes `accept` observe a
+            // ready state immediately on platforms that need a wakeup.
+            let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50));
+            drop(listener);
+        }
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // The server thread polls `stop` and every socket operation has a
+            // timeout, so it should exit promptly. Wait with a bounded grace
+            // period and detach instead of joining forever: a hung mock in a
+            // test must never hold the whole CI job.
+            let deadline = Instant::now() + SERVER_SHUTDOWN_GRACE;
+            while !join.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if join.is_finished() {
+                let _ = join.join();
+            }
         }
     }
 }
@@ -235,6 +276,9 @@ fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
         }
     }
 
+    if !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+        return None;
+    }
     let text = std::str::from_utf8(&buffer).ok()?;
     let head = text.split("\r\n\r\n").next().unwrap_or(text);
     let mut lines = head.split("\r\n");
@@ -305,18 +349,34 @@ fn write_response(stream: &mut TcpStream, response: &ResponseSpec) {
     }
     head.push_str("\r\n");
 
-    stream.write_all(head.as_bytes()).ok();
+    // Every write is bounded by the socket write timeout and aborts the rest of
+    // the response on the first error. A client that deliberately stops reading
+    // after a cap must never pin this thread (and `Drop`'s join) indefinitely.
+    if write_chunk(stream, head.as_bytes()).is_err() {
+        return;
+    }
     if response.chunked {
         for chunk in &response.chunks {
-            stream
-                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
-                .ok();
-            stream.write_all(chunk).ok();
-            stream.write_all(b"\r\n").ok();
+            if write_chunk(stream, format!("{:x}\r\n", chunk.len()).as_bytes()).is_err() {
+                return;
+            }
+            if write_chunk(stream, chunk).is_err() {
+                return;
+            }
+            if write_chunk(stream, b"\r\n").is_err() {
+                return;
+            }
         }
-        stream.write_all(b"0\r\n\r\n").ok();
-    } else if !response.body.is_empty() {
-        stream.write_all(&response.body).ok();
+        let _ = write_chunk(stream, b"0\r\n\r\n");
+        return;
     }
-    stream.flush().ok();
+    if !response.body.is_empty() && write_chunk(stream, &response.body).is_err() {
+        return;
+    }
+    let _ = stream.flush();
+}
+
+/// Write the whole buffer or fail; no partial retry loop is attempted.
+fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+    stream.write_all(bytes)
 }
