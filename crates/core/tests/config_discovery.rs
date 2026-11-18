@@ -1,10 +1,31 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use oc_providers_core::{discover_configs, prepare_changes, read_document, Dialect, Edit, EditOp};
 use serde_json::json;
 use tempfile::TempDir;
+
+/// Canonical filesystem identity for a path, for order-insensitive comparison.
+///
+/// Windows runners often live under an 8.3 short-name component
+/// (`C:\Users\RUNNER~1\AppData\Local\Temp\...`) while `tempfile` hands out the
+/// long form (`C:\Users\runneradmin\AppData\Local\Temp\...`). Both spellings
+/// name the same directory, so comparing raw strings — or even `display()`
+/// output — fails on CI while passing on developer machines. Production keeps
+/// its own canonicalization; tests compare resolved identity instead.
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Same identity comparison for a path that the API returned as a string.
+fn canonical_str(path: &str) -> PathBuf {
+    canonical(Path::new(path))
+}
+
+fn same_path(left: &str, right: &Path) -> bool {
+    canonical_str(left) == canonical(right)
+}
 
 struct TestRoots {
     _dir: TempDir,
@@ -106,9 +127,10 @@ fn discovers_global_project_and_managed_in_merge_order() {
         "global -> project direct farthest..closest -> .opencode farthest..closest -> managed"
     );
 
-    assert_eq!(
-        snapshot.project_path.as_deref(),
-        Some(web.to_string_lossy().as_ref())
+    let project_path = snapshot.project_path.as_deref().expect("project path");
+    assert!(
+        same_path(project_path, &web),
+        "project_path {project_path:?} must resolve to the scanned project directory"
     );
     assert!(snapshot.warnings.iter().any(|w| w.contains("not verified")));
     assert!(snapshot
@@ -122,7 +144,12 @@ fn discovers_global_project_and_managed_in_merge_order() {
         .find(|s| s.path.ends_with("opencode.jsonc") && s.providers[0].id == "global-provider")
         .expect("global source");
     assert!(global.writable);
-    assert_eq!(global.path, roots.global_file.to_string_lossy());
+    assert!(
+        same_path(&global.path, &roots.global_file),
+        "global source path {:?} must resolve to {:?}",
+        global.path,
+        roots.global_file
+    );
 
     let managed = snapshot
         .sources
@@ -134,12 +161,17 @@ fn discovers_global_project_and_managed_in_merge_order() {
         .warnings
         .iter()
         .any(|w| w.contains("machine-managed")));
-    assert_eq!(managed.path, roots.managed_file.to_string_lossy());
+    assert!(
+        same_path(&managed.path, &roots.managed_file),
+        "managed source path {:?} must resolve to {:?}",
+        managed.path,
+        roots.managed_file
+    );
 
     for source in snapshot
         .sources
         .iter()
-        .filter(|s| !s.path.contains("managed"))
+        .filter(|s| !same_path(&s.path, &roots.managed_file))
     {
         assert!(
             source.writable,
@@ -186,7 +218,7 @@ fn discovery_redacts_credentials_and_never_returns_raw_config() {
     let source = snapshot
         .sources
         .iter()
-        .find(|s| s.path == path.to_string_lossy())
+        .find(|s| same_path(&s.path, &path))
         .expect("project source");
     assert_eq!(
         source.providers[0].base_url.as_deref(),
@@ -213,7 +245,13 @@ fn missing_project_directory_is_reported_without_reading_anything_else() {
         .warnings
         .iter()
         .any(|w| w.contains("not a directory")));
-    assert!(snapshot.project_path.is_some());
+    // A missing directory is normalised to an absolute path, so only the
+    // presence of a project scope can be asserted here.
+    let project_path = snapshot.project_path.as_deref().expect("project path");
+    assert!(
+        canonical_str(project_path).ends_with("does-not-exist"),
+        "project_path {project_path:?} should point at the requested directory"
+    );
     assert_eq!(
         source_ids(&snapshot.sources),
         vec!["global-provider", "managed-provider"]
@@ -246,6 +284,98 @@ fn v1_sources_are_flagged_as_legacy() {
 }
 
 #[test]
+fn canonical_identity_absorbs_windows_83_short_path_aliases() {
+    // Reproduces the CI failure: the runner's TEMP is reported with an 8.3
+    // short component (`...\RUNNER~1\...`) while `tempfile` yields the long
+    // form. If `fs::canonicalize` cannot be distinguished here, the helper is
+    // still correct by construction (it compares resolved paths), so this test
+    // asserts the equivalence only when a genuine short name is available.
+    let _roots = roots();
+    let dir = tempfile::tempdir().expect("project");
+    let project = dir.path().join("short-name-project");
+    fs::create_dir_all(&project).expect("project dir");
+    let path = project.join("opencode.jsonc");
+    fs::write(
+        &path,
+        b"{\n  \"providers\": { \"short\": { \"package\": \"pkg\" } }\n}\n",
+    )
+    .expect("short config");
+
+    let Some(short) = windows_short_path(&project) else {
+        eprintln!("skipping: host did not report an 8.3 short name for the fixture");
+        return;
+    };
+    if canonical(&short) != canonical(&project) {
+        eprintln!("skipping: host returned a short name that does not alias the fixture");
+        return;
+    }
+    assert_ne!(
+        short.as_os_str(),
+        project.as_os_str(),
+        "a genuine 8.3 alias should differ textually from the long path"
+    );
+
+    assert!(
+        same_path(&short.to_string_lossy(), &project),
+        "raw aliases must compare equal after canonicalization"
+    );
+
+    // The production path reports the long form; the assertion style used by
+    // the other tests must accept it even when the caller passed the alias.
+    let snapshot = discover_configs(Some(&short));
+    let ids = source_ids(&snapshot.sources);
+    assert!(ids.contains(&"short".to_string()));
+    let project_path = snapshot.project_path.as_deref().expect("project path");
+    assert!(
+        same_path(project_path, &project),
+        "project_path {project_path:?} must resolve to the long-form project directory"
+    );
+    assert!(
+        same_path(project_path, &short),
+        "project_path must also resolve to the 8.3 alias of the same directory"
+    );
+}
+
+/// Windows 8.3 short name for `path`, or `None` when short names are disabled
+/// or unsupported. Uses `GetShortPathNameW` through PowerShell's `Add-Type` so
+/// the test needs no extra crate.
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> Option<PathBuf> {
+    use std::process::Command;
+
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         if (-not ('SN' -as [type])) {{ \
+           Add-Type -TypeDefinition 'using System;using System.Text;using System.Runtime.InteropServices;public static class SN{{[DllImport(\"kernel32.dll\",CharSet=CharSet.Unicode,SetLastError=true)]public static extern uint GetShortPathNameW(string lp,StringBuilder sb,uint n);}}' \
+         }}; \
+         $sb=New-Object System.Text.StringBuilder 512; \
+         $n=[SN]::GetShortPathNameW('{}',$sb,512); \
+         if ($n -eq 0) {{ exit 2 }}; \
+         [Console]::Out.Write($sb.ToString())",
+        path.display()
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+#[cfg(not(windows))]
+fn windows_short_path(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[test]
 fn both_json_and_jsonc_are_discovered_without_duplicates() {
     let _roots = roots();
     let dir = tempfile::tempdir().expect("project");
@@ -268,7 +398,7 @@ fn both_json_and_jsonc_are_discovered_without_duplicates() {
     let matching: Vec<_> = snapshot
         .sources
         .iter()
-        .filter(|s| s.path.contains("dual"))
+        .filter(|s| canonical_str(&s.path).starts_with(canonical(&project)))
         .collect();
     assert_eq!(matching.len(), 2);
 }
