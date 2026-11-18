@@ -1,8 +1,14 @@
+# Builds the desktop binaries without updater or signing artifacts.
+# Outputs: Windows x64 NSIS setup.exe, Linux x64 .deb, Linux x64 .AppImage,
+# and SHA256SUMS.txt. Manual runs on main upload the consolidated artifact
+# `oc-providers-ctl-<version>-x64`; tag pushes matching v<version> additionally
+# create/update a draft GitHub Release. Linux bundles use the Ubuntu 22.04 baseline.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,6 +24,9 @@ jobs:
   preflight:
     name: Tests and version preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -39,23 +48,71 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - name: Require tag, app and package versions to match
+      - name: Validate app, package and crate versions
+        id: versions
+        shell: bash
         run: |
-          node -e '
-            const fs = require("fs");
-            const tag = process.env.GITHUB_REF_NAME;
-            const appVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
-            const pkgVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
-            if (tag !== `v${appVersion}`) {
-              console.error(`Tag ${tag} does not match tauri version ${appVersion}`);
+          cat > "$RUNNER_TEMP/check-versions.js" <<'NODE'
+          const fs = require("fs");
+
+          const event = process.env.GITHUB_EVENT_NAME;
+          const ref = process.env.GITHUB_REF || "";
+          const refName = process.env.GITHUB_REF_NAME || "";
+
+          if (event === "workflow_dispatch" && ref !== "refs/heads/main") {
+            console.error(`Manual builds are restricted to main; got ${ref}.`);
+            process.exit(1);
+          }
+
+          const appVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const pkgVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+
+          let section = "";
+          let crateVersion = null;
+          for (const line of fs.readFileSync("src-tauri/Cargo.toml", "utf8").split(/\r?\n/)) {
+            const header = line.match(/^\[([^\]]+)\]$/);
+            if (header) {
+              section = header[1].trim();
+              continue;
+            }
+            if (section === "package") {
+              const value = line.match(/^version\s*=\s*"([^"]+)"/);
+              if (value) {
+                crateVersion = value[1];
+                break;
+              }
+            }
+          }
+
+          if (!appVersion || !pkgVersion || !crateVersion) {
+            console.error("Could not read app, package or crate version.");
+            process.exit(1);
+          }
+          if (pkgVersion !== appVersion) {
+            console.error(`package.json version ${pkgVersion} does not match tauri version ${appVersion}.`);
+            process.exit(1);
+          }
+          if (crateVersion !== appVersion) {
+            console.error(`src-tauri crate version ${crateVersion} does not match tauri version ${appVersion}.`);
+            process.exit(1);
+          }
+
+          if (event === "push" && ref.startsWith("refs/tags/")) {
+            if (refName !== `v${appVersion}`) {
+              console.error(`Tag ${refName} does not match app version ${appVersion}.`);
               process.exit(1);
             }
-            if (pkgVersion !== appVersion) {
-              console.error(`package.json version ${pkgVersion} does not match tauri version ${appVersion}`);
-              process.exit(1);
-            }
-            console.log(`Release ${tag} corresponds to ${appVersion}`);
-          '
+            console.log(`Tag ${refName} matches app, package and crate version ${appVersion}.`);
+          } else if (event === "workflow_dispatch") {
+            console.log(`Manual build from ${ref} for version ${appVersion}; no release will be published.`);
+          } else {
+            console.error(`Unexpected event/ref combination: ${event} ${ref}.`);
+            process.exit(1);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${appVersion}\n`);
+          NODE
+          node "$RUNNER_TEMP/check-versions.js"
 
       - name: Install locked frontend dependencies
         run: npm ci
@@ -82,6 +139,7 @@ jobs:
     name: Windows x64 / NSIS
     needs: preflight
     runs-on: windows-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -115,7 +173,7 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: "."
-          args: "--bundles nsis"
+          args: "--bundles nsis -- --locked"
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
 
@@ -132,6 +190,7 @@ jobs:
     needs: preflight
     runs-on: ubuntu-24.04
     container: ubuntu:22.04
+    timeout-minutes: 75
     permissions:
       contents: read
     defaults:
@@ -200,7 +259,7 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: "."
-          args: "--bundles deb,appimage"
+          args: "--bundles deb,appimage -- --locked"
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
 
@@ -226,21 +285,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  draft-release:
-    name: Draft release and checksums
-    needs: [build-windows, build-linux]
+  aggregate:
+    name: Consolidated installer artifact
+    needs: [preflight, build-windows, build-linux]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
     steps:
-      - name: Download workflow artifacts
+      - name: Download individual workflow artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: release-assets
           pattern: "*"
           merge-multiple: true
 
-      - name: Verify assets and write SHA256SUMS
+      - name: Verify three installers and write SHA256SUMS
         shell: bash
         run: |
           set -euo pipefail
@@ -250,13 +310,49 @@ jobs:
           deb=(*.deb)
           appimage=(*.AppImage)
           if (( ${#exe[@]} != 1 || ${#deb[@]} != 1 || ${#appimage[@]} != 1 )); then
-            printf 'Expected 1 NSIS installer, 1 deb and 1 AppImage, got %d/%d/%d\n' \
+            printf 'Expected 1 NSIS setup.exe, 1 deb and 1 AppImage, got %d/%d/%d\n' \
               "${#exe[@]}" "${#deb[@]}" "${#appimage[@]}" >&2
             ls -la
             exit 1
           fi
           sha256sum "${exe[@]}" "${deb[@]}" "${appimage[@]}" | LC_ALL=C sort -k 2 > SHA256SUMS.txt
+          echo "=== SHA256SUMS.txt ==="
           cat SHA256SUMS.txt
+
+      - name: Upload consolidated downloadable artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: oc-providers-ctl-${{ needs.preflight.outputs.version }}-x64
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    name: Draft GitHub release
+    needs: [preflight, aggregate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download consolidated artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: oc-providers-ctl-${{ needs.preflight.outputs.version }}-x64
+          path: release-assets
+
+      - name: Verify consolidated artifact and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          installers=(*.exe *.deb *.AppImage)
+          test "${#installers[@]}" -eq 3
+          test -f SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          test "$(wc -l < SHA256SUMS.txt)" -eq 3
 
       - name: Create or update draft GitHub Release
         shell: bash

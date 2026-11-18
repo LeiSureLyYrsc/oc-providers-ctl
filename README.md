@@ -97,7 +97,21 @@ docs/               边界契约与验证说明
 
 ## 发布
 
-工作流定义位于 `.github/workflows/`。版本标签触发 Windows NSIS 安装包以及 Linux deb/AppImage 构建，产物进入 GitHub Release 草稿并提供校验文件。首次发布前请检查应用版本、标签及工作流权限一致。
+工作流定义位于 `.github/workflows/`。`CI` 负责检查，`Release` 负责实际安装包构建：
+
+- **开发构建**：在 Actions 中打开 `Release` → `Run workflow`，选择 `main`。构建 Windows x64 NSIS 安装器、Linux x64 deb/AppImage，并上传带 `SHA256SUMS.txt` 的汇总 artifact；不创建 GitHub Release。
+- **版本发布**：推送与应用版本一致的 `v*` 标签，完成同样的检查和打包后创建 GitHub Release 草稿，供人工验收后发布。
+
+也可以使用 GitHub CLI 触发和等待：
+
+```sh
+gh workflow run Release --ref main
+gh run list --workflow Release --limit 5
+gh run watch <run-id> --exit-status
+gh run download <run-id> --name oc-providers-ctl-0.1.0-x64 --dir artifacts
+```
+
+artifact 名称中的版本以本次构建的应用版本为准。下载后核对校验文件；Windows 安装器不是无需运行时依赖的 portable 包。首次版本发布前请检查应用、npm 包、Rust 桌面 crate 和标签版本一致。
 
 Linux 产物需要较老构建基线及目标系统启动验证。AppImage 不保证在所有发行版运行，也不消除 glibc、图形栈等兼容约束。
 
