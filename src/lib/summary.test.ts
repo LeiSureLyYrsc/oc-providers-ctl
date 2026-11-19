@@ -25,7 +25,7 @@ describe('preview summary from staged edits', () => {
       },
     ]);
     expect(lines).toEqual([
-      { op: 'set', target: 'gateway › upstream/coder › 上下文', value: '333333' },
+      { op: 'set', target: 'gateway › upstream/coder › 上下文', value: '333,333 token' },
     ]);
     expect(JSON.stringify(lines)).not.toContain('set providers');
   });
@@ -60,6 +60,7 @@ describe('preview summary from staged edits', () => {
       { op: 'set', path: ['providers', 'new-vendor'], value: { models: {} } },
     ]);
     expect(lines[0].target).toBe('zhipu › glm-4.6 › 输出上限');
+    expect(lines[0].value).toBe('131,072 token');
     expect(lines[1].value).toBe('支持 · 档位 low/high');
     expect(lines[2].target).toBe('新增供应商 new-vendor');
   });

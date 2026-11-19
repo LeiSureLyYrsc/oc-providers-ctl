@@ -147,6 +147,12 @@ describe('reasoning preservation', () => {
 });
 
 describe('catalog', () => {
+  async function openCatalogPicker(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', { name: /Upstream Coder/ }));
+    await user.click(await screen.findByRole('button', { name: '从模型目录查找' }));
+    return waitFor(() => screen.findByRole('dialog', { name: '查询模型资料' }));
+  }
+
   it('is never fetched at startup and loads on demand before searching', async () => {
     const user = userEvent.setup();
     const backend = backendWith();
@@ -154,14 +160,12 @@ describe('catalog', () => {
     await waitFor(() => expect(backend.scanConfigs).toHaveBeenCalled());
     expect(backend.fetchCatalog).not.toHaveBeenCalled();
 
-    await openModelEditor(user);
-    await user.click(screen.getByRole('button', { name: '从模型目录查找' }));
-    const catalogDialog = await waitFor(() => screen.findByRole('dialog', { name: '从模型目录查找' }));
+    const catalogDialog = await openCatalogPicker(user);
     expect(within(catalogDialog).getByText(/还没有载入模型目录/)).toBeInTheDocument();
     expect(within(catalogDialog).getByText('更新目录')).toBeInTheDocument();
     expect(backend.fetchCatalog).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole('button', { name: '更新目录' }));
+    await user.click(within(catalogDialog).getByRole('button', { name: '更新目录' }));
     await waitFor(() => expect(backend.fetchCatalog).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getAllByText(/42 个模型/).length).toBeGreaterThan(0));
     await waitFor(() => expect(backend.matchModels).toHaveBeenCalled());
@@ -175,10 +179,8 @@ describe('catalog', () => {
       }),
     });
     render(<App mode="native" backend={backend} />);
-    await openModelEditor(user);
-    await user.click(screen.getByRole('button', { name: '从模型目录查找' }));
-    await waitFor(() => screen.getByRole('dialog', { name: '从模型目录查找' }));
-    await user.click(screen.getByRole('button', { name: '更新目录' }));
+    const catalogDialog = await openCatalogPicker(user);
+    await user.click(within(catalogDialog).getByRole('button', { name: '更新目录' }));
     await waitFor(() => expect(screen.getByText('模型目录刷新失败。')).toBeInTheDocument());
     expect(screen.queryByText(/个模型 ·/)).toBeNull();
   });

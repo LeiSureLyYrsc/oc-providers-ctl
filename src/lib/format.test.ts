@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { maskSecretsInDiff, variantSummary } from './format';
-import { describeReasoning, reasoningAdoptionValue, reasoningSupported } from './reasoning';
+import {
+  describeReasoning,
+  describeReasoningDetail,
+  reasoningAdoptionValue,
+  reasoningSupported,
+} from './reasoning';
 
 describe('reasoning display', () => {
   it('shows effort and budget from normalized V2 metadata', () => {
@@ -11,7 +16,35 @@ describe('reasoning display', () => {
         effort: ['low', 'high'],
         budget: { min: 0, max: 16384 },
       }),
-    ).toBe('支持 · 可切换 · 档位 low/high · 预算 0–16384');
+    ).toBe('支持 · 允许关闭思考 · 档位 low/high · 预算 0–16384');
+  });
+
+  it('splits capability, toggle, levels and budget for the read-only pane', () => {
+    expect(
+      describeReasoningDetail({
+        supported: true,
+        toggle: true,
+        effort: ['low', 'high'],
+        budget: { min: 0, max: 16384 },
+      }),
+    ).toEqual({
+      supported: '支持',
+      toggle: '允许关闭思考',
+      effort: 'low / high',
+      budget: '0 – 16,384 token',
+    });
+  });
+
+  it('does not turn a declared capability into a level', () => {
+    expect(describeReasoningDetail({ supported: true })).toEqual({
+      supported: '支持',
+      toggle: '未设置',
+      effort: '未设置',
+      budget: '未设置',
+    });
+    expect(describeReasoningDetail(true).effort).toBe('未设置');
+    expect(describeReasoningDetail(null).supported).toBe('未设置');
+    expect(describeReasoningDetail({ toggle: true }).supported).toBe('结构未知');
   });
 
   it('keeps bool fallback for display only', () => {

@@ -1,6 +1,6 @@
 import type { ModelEntry, ProviderEntry, SourceDocument } from '../ipc';
 import { formatTokens } from '../lib/format';
-import { reasoningSupported } from '../lib/reasoning';
+import { describeReasoningDetail, reasoningSupported } from '../lib/reasoning';
 import { Icon } from '../components/Icon';
 
 export interface DraftLabel {
@@ -128,6 +128,7 @@ export function ModelsPane({
     drafts.filter((draft) => draft.path[2] === 'models').map((draft) => draft.path[3]),
   );
   const deleting = drafts.some((draft) => draft.path.length === 2);
+  const detail = describeReasoningDetail(model?.reasoning);
 
   return (
     <section className="pane pane-right" aria-label="模型">
@@ -224,17 +225,32 @@ export function ModelsPane({
                 </div>
                 <div className="read-line">
                   <span className="read-label">上下文</span>
-                  <span className="read-value">{formatTokens(model.context)}</span>
+                  <span className="read-value">
+                    {model.context === null ? '未设置' : `${formatTokens(model.context)} token`}
+                  </span>
                 </div>
                 <div className="read-line">
                   <span className="read-label">输入 / 输出</span>
                   <span className="read-value">
-                    {formatTokens(model.input)} / {formatTokens(model.output)}
+                    {model.input === null ? '未设置' : `${formatTokens(model.input)} token`} /{' '}
+                    {model.output === null ? '未设置' : `${formatTokens(model.output)} token`}
                   </span>
                 </div>
                 <div className="read-line">
-                  <span className="read-label">推理</span>
-                  <span className="read-value">{reasoningSupportLabel(model.reasoning)}</span>
+                  <span className="read-label">思考能力</span>
+                  <span className="read-value">{detail.supported}</span>
+                </div>
+                <div className="read-line">
+                  <span className="read-label">可关闭思考</span>
+                  <span className="read-value">{detail.toggle}</span>
+                </div>
+                <div className="read-line">
+                  <span className="read-label">可选档位</span>
+                  <span className="read-value mono">{detail.effort}</span>
+                </div>
+                <div className="read-line">
+                  <span className="read-label">预算</span>
+                  <span className="read-value">{detail.budget}</span>
                 </div>
               </div>
 
@@ -271,18 +287,20 @@ export function ModelsPane({
 
               <div className="card">
                 <div className="card-head">
-                  <h3>信息补全</h3>
+                  <h3>查询模型资料</h3>
                   <span className="spacer" />
                   <button
                     type="button"
                     className="text-btn"
                     onClick={onSuggest}
-                    disabled={readOnly || busy}
+                    disabled={busy}
                   >
                     从模型目录查找
                   </button>
                 </div>
-                <p className="field-hint">按模型 ID 查找已知的名称和长度，确认后才会写入。</p>
+                <p className="field-hint">
+                  按模型 ID 或名称查询公共模型目录里的名称、长度和思考能力；勾选的字段才会写入，已有内容默认不覆盖。
+                </p>
               </div>
             </>
           ) : (
@@ -357,7 +375,9 @@ export function ModelsPane({
                               <span className="primary">{entry.name || entry.id}</span>
                               <span className="secondary mono">{entry.id}</span>
                             </span>
-                            <span className="model-meta">{formatTokens(entry.context)}</span>
+                            <span className="model-meta">
+                              {entry.context === null ? '—' : `${formatTokens(entry.context)} token`}
+                            </span>
                             <span className="model-flag">
                               {defaultId === entry.id ? (
                                 <span className="chip" data-tone="accent">
@@ -366,8 +386,12 @@ export function ModelsPane({
                                 </span>
                               ) : null}
                               {supported === true ? (
-                                <span className="chip" data-tone="muted">
-                                  推理
+                                <span
+                                  className="chip"
+                                  data-tone="muted"
+                                  title="配置声明支持思考，不代表档位或默认强度"
+                                >
+                                  可思考
                                 </span>
                               ) : null}
                               {editedIds.has(entry.id) ? (
@@ -402,10 +426,4 @@ export function ModelsPane({
       </div>
     </section>
   );
-}
-
-function reasoningSupportLabel(value: unknown): string {
-  const supported = reasoningSupported(value);
-  if (supported === null) return '未设置';
-  return supported ? '支持' : '不支持';
 }

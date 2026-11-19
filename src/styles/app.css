@@ -742,6 +742,19 @@ button:disabled {
   color: var(--on-surface-2);
 }
 
+/* Label plus one inline action, e.g. "显示名称  [查询模型资料]". */
+.field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.field-label-row .field-label {
+  flex: 1;
+  min-width: 0;
+}
+
 .field-hint {
   font-size: 13px;
   line-height: 1.45;
@@ -992,6 +1005,171 @@ button:disabled {
   color: var(--tertiary);
   font-size: 14px;
   line-height: 1.5;
+}
+
+.dialog-warnings {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--on-surface-3);
+}
+
+/* ------------------------------------------------------ candidate picker */
+
+.candidate-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.catalog-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  color: var(--on-surface-3);
+}
+
+.candidate-list {
+  margin-top: 2px;
+}
+
+.candidate-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.candidate-item {
+  border-bottom: 1px solid var(--outline-variant);
+}
+
+.candidate-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 4px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--on-surface);
+  text-align: left;
+}
+
+.candidate-head:hover {
+  background: var(--state-hover);
+}
+
+.candidate-item[data-open='true'] .candidate-head {
+  background: var(--surface-1);
+}
+
+.candidate-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.candidate-id {
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-sub,
+.candidate-source {
+  font-size: 13px;
+  color: var(--on-surface-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 4px 12px;
+}
+
+.candidate-field {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) 120px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 14px;
+  border-top: 1px solid var(--outline-variant);
+}
+
+.candidate-field-label {
+  color: var(--on-surface-3);
+}
+
+.candidate-field-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--on-surface-2);
+}
+
+.candidate-current {
+  color: var(--on-surface-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-proposed {
+  color: var(--on-surface);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.candidate-field-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+  font-size: 13px;
+  color: var(--on-surface-3);
+  white-space: nowrap;
+}
+
+.candidate-field[data-status='available'] .candidate-field-action {
+  color: var(--primary);
+}
+
+.candidate-field-note {
+  grid-column: 2 / -1;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--on-surface-3);
+}
+
+.candidate-fields-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  font-size: 13px;
+  color: var(--on-surface-3);
+}
+
+.candidate-fields-foot > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.candidate-fields-empty {
+  padding: 0 4px 14px;
+  font-size: 13px;
+  color: var(--on-surface-3);
 }
 
 /* --------------------------------------------------------------- menus */

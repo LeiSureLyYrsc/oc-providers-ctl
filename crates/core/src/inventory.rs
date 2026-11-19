@@ -9,6 +9,10 @@
 //! The request is always a GET to the provider's model-list endpoint. The
 //! module never starts provider packages or makes inference calls, and it does
 //! not read OpenCode OAuth/auth databases.
+//!
+//! Any well-formed `http` or `https` endpoint is accepted. Redirects are never
+//! followed, and successful plain-HTTP responses carry an explicit warning
+//! that the exchange was unencrypted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -65,6 +69,10 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
     let api_key = resolve_api_key(&settings, config_dir)?;
     let headers = prepare_headers(&settings.headers, api_key.as_deref(), config_dir)?;
 
+    // Plain HTTP is allowed for any host, but a successful fetch reports the
+    // lack of transport encryption. Compute it before the URL is consumed.
+    let plaintext_transport = plaintext_transport_warning(&endpoint);
+
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(REQUEST_TIMEOUT)
@@ -112,6 +120,9 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
     }
 
     let mut warnings = Vec::new();
+    if let Some(warning) = plaintext_transport {
+        warnings.push(warning);
+    }
     warnings.push(
         "This response only reports model identifiers; it does not verify model capabilities or runtime compatibility."
             .to_string(),
@@ -432,14 +443,7 @@ fn parse_provider_url(raw: &str) -> Result<Url, String> {
     }
 
     match url.scheme() {
-        "https" => {}
-        "http" if is_loopback_host(&url) => {}
-        "http" => {
-            return Err(
-                "Remote provider endpoints must use HTTPS; plain HTTP is only allowed for loopback addresses."
-                    .to_string(),
-            );
-        }
+        "http" | "https" => {}
         _ => {
             return Err("Provider endpoint must use HTTP or HTTPS.".to_string());
         }
@@ -476,18 +480,14 @@ fn has_credential_query(url: &Url) -> bool {
     })
 }
 
-fn is_loopback_host(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(domain)) => {
-            domain.eq_ignore_ascii_case("localhost")
-                || domain
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case("localhost")
-        }
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
-    }
+/// Plain HTTP is accepted for any host, but a successful response is flagged
+/// so the shell can surface that credentials and model data travelled without
+/// transport encryption. The message is intentionally static: it must never
+/// echo the endpoint, its query, or any credential material.
+fn plaintext_transport_warning(endpoint: &Url) -> Option<String> {
+    (endpoint.scheme() == "http").then(|| {
+        "This request used plain HTTP. The provider response and any credentials were sent without transport encryption and could be observed or modified on the network. Prefer an HTTPS base URL.".to_string()
+    })
 }
 
 fn models_endpoint(mut base: Url) -> Url {
@@ -866,4 +866,115 @@ async fn read_capped_body(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{models_endpoint, parse_provider_url, plaintext_transport_warning};
+
+    #[test]
+    fn parse_accepts_https_and_remote_plain_http() {
+        // HTTPS remains accepted for public hosts.
+        let https = parse_provider_url("https://api.example.com/v1").expect("https endpoint");
+        assert_eq!(https.scheme(), "https");
+        assert_eq!(https.host_str(), Some("api.example.com"));
+
+        // Plain HTTP is no longer restricted to loopback: any legal host is
+        // accepted by the parser. No network access happens here.
+        let remote = parse_provider_url("http://api.example.com/v1").expect("remote http endpoint");
+        assert_eq!(remote.scheme(), "http");
+        assert_eq!(remote.host_str(), Some("api.example.com"));
+
+        let loopback = parse_provider_url("http://127.0.0.1:8080/v1").expect("loopback http");
+        assert_eq!(loopback.host_str(), Some("127.0.0.1"));
+
+        let ipv6 = parse_provider_url("http://[::1]:8080/v1").expect("ipv6 loopback http");
+        assert_eq!(ipv6.scheme(), "http");
+
+        // Surrounding whitespace and a path-less host are still accepted.
+        let spaced = parse_provider_url("  http://models.example.com  ").expect("trimmed url");
+        assert_eq!(
+            models_endpoint(spaced).as_str(),
+            "http://models.example.com/models"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_illegal_schemes() {
+        for raw in ["ftp://api.example.com/v1", "ws://api.example.com/v1"] {
+            let error = parse_provider_url(raw).expect_err(raw);
+            assert!(error.contains("HTTP or HTTPS"), "{raw}: {error}");
+        }
+
+        // Schemes without an authority host are still refused, just by the
+        // host check that runs first.
+        for raw in ["file:///etc/passwd", "javascript:alert(1)"] {
+            let error = parse_provider_url(raw).expect_err(raw);
+            assert!(error.contains("host"), "{raw}: {error}");
+        }
+
+        // A scheme-less value is not a URL at all.
+        let error = parse_provider_url("api.example.com/v1").expect_err("relative url");
+        assert!(
+            error.contains("not a valid URL"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_embedded_credentials_and_secret_queries() {
+        for raw in [
+            "http://user:url-secret@api.example.com/v1",
+            "https://user:url-secret@api.example.com/v1",
+            "https://url-secret@api.example.com/v1",
+        ] {
+            let error = parse_provider_url(raw).expect_err(raw);
+            assert!(error.contains("embedded credentials"), "{raw}: {error}");
+            assert!(!error.contains("url-secret"), "{raw}: {error}");
+        }
+
+        for raw in [
+            "http://api.example.com/v1?api_key=query-secret",
+            "https://api.example.com/v1?token=query-secret",
+            "https://api.example.com/v1?access_token=query-secret",
+            "https://api.example.com/v1?my_key=query-secret",
+        ] {
+            let error = parse_provider_url(raw).expect_err(raw);
+            assert!(error.contains("credential-like query"), "{raw}: {error}");
+            assert!(!error.contains("query-secret"), "{raw}: {error}");
+        }
+
+        // A non-credential query is tolerated by the parser; it is dropped
+        // when the model-list path is built.
+        let benign =
+            parse_provider_url("https://api.example.com/v1?page=2&limit=10").expect("benign query");
+        let endpoint = models_endpoint(benign);
+        assert_eq!(endpoint.path(), "/v1/models");
+        assert!(endpoint.query().is_none());
+        assert!(endpoint.fragment().is_none());
+    }
+
+    #[test]
+    fn parse_rejects_fragments() {
+        let error = parse_provider_url("https://api.example.com/v1#section").expect_err("fragment");
+        assert!(error.contains("fragment"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn plaintext_warning_is_only_emitted_for_http_and_static() {
+        let http = parse_provider_url("http://api.example.com/v1").expect("http");
+        let warning = plaintext_transport_warning(&http).expect("http warning");
+        assert!(warning.contains("plain HTTP"), "warning: {warning}");
+        assert!(warning.contains("without transport"), "warning: {warning}");
+        // The warning must not echo endpoint details or any secret material.
+        assert!(!warning.contains("api.example.com"), "warning: {warning}");
+        assert!(!warning.contains("://"), "warning: {warning}");
+
+        let https = parse_provider_url("https://api.example.com/v1").expect("https");
+        assert!(plaintext_transport_warning(&https).is_none());
+
+        // Query secrets are refused before reaching this point, so a parser
+        // rejection can never surface them through the warning.
+        assert!(parse_provider_url("http://api.example.com/v1?token=leak").is_err());
+    }
 }

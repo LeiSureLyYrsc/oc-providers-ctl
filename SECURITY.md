@@ -9,7 +9,7 @@ This app edits configuration and can send existing provider credentials to a use
 - Credential values are never part of frontend configuration DTOs. Errors and previews must not echo raw configuration, HTTP response bodies or authorization values.
 - Existing inline keys and environment/file references remain in place. The application does not manage OAuth or read OpenCode authentication databases.
 - Provider discovery is an explicit GET model-list operation. It must not trigger inference or execute provider packages.
-- Plain HTTP is only permitted for local loopback endpoints. Redirects must not forward credentials to another origin.
+- Provider model-list requests permit HTTP and HTTPS, including remote HTTP endpoints explicitly selected through the provider configuration. HTTP does not encrypt requests or credentials; the UI warns about this risk rather than blocking the request. Redirects are not followed. Public model-catalog downloads retain their separate HTTPS-only policy (except loopback test sources).
 - Public model metadata is untrusted data, not instructions. It must not become HTML, executable code, shell commands or automatic configuration writes.
 - A public catalog match does not prove that a proxy supports the upstream model's limits, reasoning settings or tool calling.
 

@@ -305,22 +305,82 @@ async fn file_credentials_are_resolved_in_memory_and_auth_stores_are_refused() {
 }
 
 #[tokio::test]
+async fn plain_http_fetch_adds_a_plaintext_warning() {
+    // Plain HTTP is accepted for any host, not just loopback. A local mock is
+    // used here purely as a deterministic plain-HTTP origin; nothing in the
+    // implementation treats the host differently based on locality.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{"data":[{"id":"plain-http-model"}]}"#,
+    )]);
+    let config_path = config_with(
+        &directory,
+        "plain-http.json",
+        "providers",
+        "plain",
+        &format!(
+            r#"{{ "package": "@ai-sdk/openai-compatible", "settings": {{ "baseURL": "{}/v1", "apiKey": "plain-http-secret" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "plain")
+        .await
+        .expect("plain http inventory");
+    assert_eq!(inventory.model_ids, vec!["plain-http-model"]);
+    let plaintext_warning = inventory
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("plain HTTP"))
+        .expect("plaintext transport warning");
+    assert!(
+        plaintext_warning.contains("without transport encryption"),
+        "warning: {plaintext_warning}"
+    );
+    assert_no_secret(&inventory, "plain-http-secret");
+    // The warning must describe the risk without echoing the endpoint.
+    assert!(
+        !plaintext_warning.contains(&server.base_url),
+        "warning leaks endpoint: {plaintext_warning}"
+    );
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    assert_eq!(server.requests()[0].path, "/v1/models");
+}
+
+#[tokio::test]
 async fn unsafe_urls_are_refused_before_any_credentialed_request() {
     let directory = tempfile::tempdir().expect("tempdir");
     let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
     let server_port = server.addr().port();
 
-    let remote_http = config_with(
+    let bad_scheme = config_with(
         &directory,
-        "remote-http.json",
+        "bad-scheme.json",
         "provider",
-        "remote",
-        r#"{ "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "http://example.com/v1" } }"#,
+        "scheme",
+        r#"{ "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "ftp://example.com/v1" } }"#,
     );
-    let error = fetch_inventory(&remote_http, "remote")
+    let error = fetch_inventory(&bad_scheme, "scheme")
         .await
-        .expect_err("remote http");
-    assert!(error.contains("HTTPS"), "unexpected error: {error}");
+        .expect_err("unsupported scheme");
+    assert!(error.contains("HTTP or HTTPS"), "unexpected error: {error}");
+
+    let missing_base = config_with(
+        &directory,
+        "no-base.json",
+        "provider",
+        "nobase",
+        r#"{ "npm": "@ai-sdk/openai-compatible", "options": { "apiKey": "sk-must-not-appear" } }"#,
+    );
+    let error = fetch_inventory(&missing_base, "nobase")
+        .await
+        .expect_err("missing base URL");
+    assert!(
+        error.contains("does not define a base URL"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.contains("sk-must-not-appear"));
     assert_eq!(server.request_count(), 0);
 
     let embedded = config_with(

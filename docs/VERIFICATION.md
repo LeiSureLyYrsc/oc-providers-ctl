@@ -2,6 +2,20 @@
 
 The goal is a usable first desktop version, not a claim that all OpenCode versions or Linux distributions have been certified. Test fixtures must be isolated from the user's real configuration and credentials.
 
+## HTTP inventory and model capability editing (2026-11-19)
+
+Verification used only temporary configuration fixtures and mocked backends; no real user configuration or provider credentials were modified. Rust reused `I:\oc-providers-ctl-build\target` via process-local `CARGO_TARGET_DIR`.
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo test -p oc-providers-core --locked`: exit 0, 70 passed, 1 intentionally ignored public models.dev live-network smoke. Remote HTTP URL acceptance is established by deterministic parser tests; the actual GET/credential/warning behavior uses a loopback HTTP fixture, not a real remote host. URL credential/query checks, redirects, timeouts and response caps remain covered. V2 capability edits are committed to a temporary file and re-read with support, toggle, effort and budget retained.
+- `cargo clippy -p oc-providers-core --all-targets --locked -- -D warnings`: exit 0.
+- `cargo test -p oc-providers-ctl --lib --locked`: exit 0, 8 passed. `cargo check -p oc-providers-ctl --locked`: exit 0. These establish shell checks, not a newly packaged executable.
+- Final `npm test`: exit 0, 133 tests in 13 files. Coverage includes capability editing/removal, invalid budgets, basic/JSON synchronization, retained/cleared variants, V1 boolean-only adoption, explicit candidate overwrite selection, one-sided budget display, request-ID preservation and stale lookup replies.
+- Final `npm run build`: exit 0, including `tsc -b` and production Vite build.
+- Headless Chromium against the final emitted `dist/` via `with_server.py` and a temporary `browser_smoke.py`: exit 0. Exercised a V2 provider in the mixed demo fixture, token/effort/budget editing, basic/JSON round trip, single-dialog directory lookup, no default overwrite selections, staged preview, disabled demo disk writes and an 860px viewport without document/dialog horizontal overflow. No page errors. Initial smoke-script attempts selected unavailable demo fixtures; those selector errors were corrected before the final passing run.
+
+Logs, the browser script, result JSON and screenshots are stored locally under `C:\Users\quqiO\AppData\Local\Temp\opencode\http-model-capabilities-verify`. No live provider API call, real LAN HTTP request, native save/restore UI E2E, release executable rebuild or Linux validation was performed for this change. Catalog suggestions are not evidence of runtime model capabilities.
+
 | Claim | Owner | Minimum evidence |
 | --- | --- | --- |
 | V1/V2 entries retain their format; unsupported nested mixing is rejected | Rust config core | Fixture tests for both shapes, valid top-level coexistence, invalid nested mixing and ambiguous inputs |

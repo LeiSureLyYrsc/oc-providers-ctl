@@ -462,6 +462,19 @@ fn v2_edits_preserve_trivia_and_supported_fields() {
     ];
     let prepared = prepare_changes(&path, &before.hash, &edits).expect("prepare v2");
     let after = commit_changes(&prepared).expect("commit v2");
+    let reread = read_document(&path).expect("reread v2 capabilities");
+    let expected_reasoning = json!({
+        "supported": true, "effort": ["medium"], "toggle": true,
+        "budget": { "min": 0, "max": 4096 }
+    });
+    assert_eq!(
+        after.providers[0].models[0].reasoning,
+        Some(expected_reasoning.clone())
+    );
+    assert_eq!(
+        reread.providers[0].models[0].reasoning,
+        Some(expected_reasoning)
+    );
     assert_eq!(
         after.providers[0].models[0].request_id.as_deref(),
         Some("upstream/coder-next")

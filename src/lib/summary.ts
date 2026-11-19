@@ -88,27 +88,36 @@ export function describeEdits(edits: SummaryEdit[]): SummaryLine[] {
     lines.push({
       op: edit.op,
       target: `${providerId} › ${modelId} › ${humanLeaf(leaf)}`,
-      value: edit.op === 'set' ? formatValue(edit.value) : undefined,
+      value: edit.op === 'set' ? formatValue(edit.value, leaf) : undefined,
     });
   }
   return lines;
 }
 
-function formatValue(value: unknown): string {
+function formatValue(value: unknown, leaf?: string): string {
   if (value === null || value === undefined) return '（空）';
   if (typeof value === 'string') return value.length > 60 ? `${value.slice(0, 57)}…` : value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'number') {
+    const formatted = new Intl.NumberFormat('en-US').format(value);
+    return leaf && (leaf === 'context' || leaf === 'input' || leaf === 'output')
+      ? `${formatted} token`
+      : formatted;
+  }
+  if (typeof value === 'boolean') return String(value);
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
     if (typeof record.supported === 'boolean') {
       const effort = Array.isArray(record.effort)
-        ? (record.effort as unknown[]).filter((entry) => typeof entry === 'string')
+        ? (record.effort as unknown[]).filter((entry): entry is string => typeof entry === 'string')
         : [];
-      return effort.length > 0
-        ? `${record.supported ? '支持' : '不支持'} · 档位 ${effort.join('/')}`
-        : record.supported
-          ? '支持'
-          : '不支持';
+      const budget = record.budget;
+      const hasBudget =
+        budget !== null && typeof budget === 'object' && !Array.isArray(budget) &&
+        ('min' in budget || 'max' in budget);
+      const parts = [record.supported ? '支持' : '不支持'];
+      if (effort.length > 0) parts.push(`档位 ${effort.join('/')}`);
+      if (hasBudget) parts.push('含预算');
+      return parts.join(' · ');
     }
     try {
       const text = JSON.stringify(value);

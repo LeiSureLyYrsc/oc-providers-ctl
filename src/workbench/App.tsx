@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useState } from 'react';
 import type { Backend, ModelCandidate, ModelEntry, ProviderEntry, SourceDocument } from '../ipc';
 import { pickConfigFile, pickProjectFolder, toSafeMessage } from '../ipc';
-import { candidateAdoptionEdits } from '../lib/adoption';
+import { candidateAdoptionEdits, type AdoptionSelection } from '../lib/adoption';
 import type { DraftIntent } from '../lib/editRules';
 import {
   buildModelCreateValue,
@@ -516,14 +516,14 @@ export function App({ mode, backend }: Props) {
     );
   }
 
-  function adoptSuggestion(candidate: ModelCandidate, includeReasoning: boolean): void {
+  function adoptSuggestion(candidate: ModelCandidate, selection: AdoptionSelection): void {
     if (!provider || !model) return;
     const dialect = concreteDialect(provider);
     if (!dialect) return;
-    const edits = candidateAdoptionEdits(dialect, provider, model, candidate, includeReasoning);
+    const edits = candidateAdoptionEdits(dialect, provider, model, candidate, selection);
     edits.forEach((edit) => stage(dialect, 'field', edit.path, 'set', edit.value, edit.label));
     setSuggestionFor(null);
-    if (edits.length === 0) notify('info', '这条建议没有可补充的内容。');
+    if (edits.length === 0) notify('info', '没有需要写入的字段：选中的值和现有内容相同。');
   }
 
   function addFromInventory(ids: string[]): void {
@@ -821,6 +821,10 @@ export function App({ mode, backend }: Props) {
           open={editingModel}
           provider={provider}
           model={model}
+          catalog={state.catalog}
+          catalogLoading={state.catalogLoading}
+          onRefreshCatalog={() => refreshCatalog(false)}
+          onSearch={(text: string) => backend.matchModels(text, provider.id)}
           onClose={() => setEditingModel(false)}
           onSave={saveModelFields}
           onCreate={(input, reasoning) => createModel(input, reasoning)}
@@ -832,6 +836,7 @@ export function App({ mode, backend }: Props) {
           open
           provider={provider}
           model={provider.models.find((entry) => entry.id === suggestionFor) ?? null}
+          writable={Boolean(source?.writable && !busy)}
           catalog={state.catalog}
           catalogLoading={state.catalogLoading}
           onRefreshCatalog={() => refreshCatalog(false)}
