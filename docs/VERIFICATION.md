@@ -26,20 +26,20 @@ Logs, the browser script, result JSON and screenshots are stored locally under `
 | Inventory never generates inference or leaks redirect credentials | Network core | Local mock HTTP tests for GET-only inventory, auth errors, redirect policy, response limits and unsafe URLs |
 | The UI stages changes, shows the target and only saves a valid preview | Frontend | Deterministic edit/IPC tests; build/typecheck; browser demo never invokes disk save |
 | Native commands are restricted to authorized sources | Tauri shell | Compile check plus path/command scope inspection; invalid path/preview rejection tests where available |
-| Release assets are installable on supported systems | Release validation | Windows 11 and Ubuntu 22.04/24.04 install/start/scan-a-fixture smoke tests; checksums and artifact list |
+| Release assets run on supported systems; Windows requires no application installation | Release validation | Windows 11: copy only the portable exe to an otherwise empty directory, launch and scan a fixture; Ubuntu 22.04/24.04: install/start deb and launch AppImage; checksums and artifact list |
 
 ## Check layers
 
 1. Focused tests run by each implementation lane in its own scope.
 2. After reconciling all writers, run frontend typecheck/tests/build, Rust format/core tests/Clippy and desktop compilation once against the final tree.
 3. Inspect all failure excerpts before making repairs. Rerun only checks invalidated by those repairs, plus mandatory release checks.
-4. Record exact commands, exit statuses and limitations in the delivery summary. A build or a mocked UI test is not evidence that a native installation was exercised.
+4. Record exact commands, exit statuses and limitations in the delivery summary. A build or a mocked UI test is not evidence that the distributed native artifact was exercised.
 
 ## Manual release smoke scenario
 
 Use a throwaway home/config root or an explicit fixture, never the user's only configuration copy:
 
-1. Launch the installed application and verify its native window and empty state.
+1. On Windows, copy only the portable `.exe` into an otherwise empty directory and launch it as a standard user with WebView2 Runtime available, without installing the application. On Linux, install the deb or launch the AppImage. Verify the native window and empty state.
 2. Load V1 and V2 fixtures containing comments and an environment credential reference.
 3. Change one context limit; inspect the target path and preview; save and compare unrelated bytes.
 4. Edit the file externally after preparing a preview; confirm saving is rejected.
@@ -48,7 +48,19 @@ Use a throwaway home/config root or an explicit fixture, never the user's only c
 7. List models from an isolated local HTTP fixture. Confirm no chat/completion endpoint was contacted and no key appears in UI/errors.
 8. Disconnect the network and confirm cached catalog behavior is explicit.
 
-Do not mark this scenario passed unless it was actually run on the named OS and installed artifact.
+Do not mark this scenario passed unless it was actually run on the named OS and distributed artifact. Windows portability does not imply an embedded WebView2 Runtime or data stored beside the executable; existing user-data paths remain unchanged.
+
+## Windows portable distribution validation
+
+The Windows release configuration now disables installer bundling; Linux deb/AppImage packaging is unchanged. Local validation on 2026-11-18 used process-local `CARGO_TARGET_DIR=I:\oc-providers-ctl-build\target`:
+
+- `npm run tauri build -- --no-bundle -- --locked`: exit 0, including frontend typecheck/build and optimized native compilation. The executable is 14,563,840 bytes; SHA-256 `10FFC0F9B564C74F02F22A5E21C8012AB8BB6DC00C62DFE7B09147F0A1185E42`.
+- `npm test`: exit 0, 76 tests across 10 files. `git diff --check`: exit 0.
+- Visual Studio `dumpbin /dependents` on the release executable: exit 0; only Windows system DLL imports, no companion WebView2Loader or MSVC runtime DLL. WebView2 Runtime itself remains an external prerequisite.
+- A copy of only the executable launched from an otherwise empty directory. Its native window responded, UI Automation found synthetic provider/model markers from isolated global and managed fixtures, and WebView2 child processes were observed. The application directory still contained only the executable after exit; fixture hashes were unchanged. Only the smoke test's own process tree was stopped.
+- Final workflow YAML parsing and all 19 shell-block syntax checks passed. Local aggregation simulations accepted the expected binary, rejected installer filenames and missing/duplicate executables, and verified the renamed portable artifact with checksums.
+
+Logs for this local run are in `C:\Users\quqiO\AppData\Local\Temp\opencode\final-verify-20261118-235048`. No remote Actions run, Linux artifact launch, missing-WebView2 scenario or native save/restore E2E was performed in this packaging change. The smoke establishes launch and fixture scanning, not the full manual release scenario above. Existing application-data paths remain in use; this is installation-free distribution, not a zero-state executable.
 
 ## Initial Windows development validation
 

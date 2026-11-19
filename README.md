@@ -2,7 +2,7 @@
 
 基于 **Rust + Tauri 2 + React / TypeScript** 的 OpenCode 供应商与模型配置管理器。
 
-目标平台：Windows 11 x64、Ubuntu 22.04 / 24.04 x64。安装包由 GitHub Actions 编译；本地开发不需要先生成安装包。
+目标平台：Windows 11 x64、Ubuntu 22.04 / 24.04 x64。Windows 提供单个免安装 `.exe`，下载后直接运行；Linux 提供 deb / AppImage。发布产物由 GitHub Actions 编译。
 
 > 首个开发版本。请先在配置副本上验证。配置文件中的参数、公共模型目录的建议以及供应商公布的模型列表，不等于已经验证的运行时能力。
 
@@ -66,7 +66,15 @@ cargo test -p oc-providers-core
 cargo clippy -p oc-providers-core --all-targets -- -D warnings
 ```
 
-原生壳的编译检查、安装包生成还需要相应平台依赖；这些检查与纯 Rust 核心测试分开运行。
+原生壳的编译检查、发布产物生成还需要相应平台依赖；这些检查与纯 Rust 核心测试分开运行。
+
+在 Windows 本地生成免安装应用：
+
+```sh
+npm run tauri build -- --no-bundle -- --locked
+```
+
+产物是 `target/release/oc-providers-ctl.exe`；若设置了 `CARGO_TARGET_DIR`，则位于该目录下的 `release/`。前端资源已内嵌，只需分发这个 `.exe`，不需要同时复制 `dist/`、Node.js 或 Rust 工具链。
 
 ## 安全操作流程
 
@@ -101,9 +109,9 @@ docs/               边界契约与验证说明
 
 ## 发布
 
-工作流定义位于 `.github/workflows/`。`CI` 负责检查，`Release` 负责实际安装包构建：
+工作流定义位于 `.github/workflows/`。`CI` 负责检查，`Release` 负责发布产物构建：
 
-- **开发构建**：在 Actions 中打开 `Release` → `Run workflow`，选择 `main`。构建 Windows x64 NSIS 安装器、Linux x64 deb/AppImage，并上传带 `SHA256SUMS.txt` 的汇总 artifact；不创建 GitHub Release。
+- **开发构建**：在 Actions 中打开 `Release` → `Run workflow`，选择 `main`。构建 Windows x64 免安装 `.exe`、Linux x64 deb/AppImage，并上传带 `SHA256SUMS.txt` 的汇总 artifact；不创建 GitHub Release。
 - **版本发布**：推送与应用版本一致的 `v*` 标签，完成同样的检查和打包后创建 GitHub Release 草稿，供人工验收后发布。
 
 也可以使用 GitHub CLI 触发和等待：
@@ -115,11 +123,15 @@ gh run watch <run-id> --exit-status
 gh run download <run-id> --name oc-providers-ctl-0.1.0-x64 --dir artifacts
 ```
 
-artifact 名称中的版本以本次构建的应用版本为准。下载后核对校验文件；Windows 安装器不是无需运行时依赖的 portable 包。首次版本发布前请检查应用、npm 包、Rust 桌面 crate 和标签版本一致。
+artifact 名称中的版本以本次构建的应用版本为准。下载后核对校验文件。Windows 文件名为 `oc-providers-ctl_<版本>_x64-portable.exe`，直接双击运行，无需安装或管理员权限；更新时退出应用并替换 `.exe` 即可。首次版本发布前请检查应用、npm 包、Rust 桌面 crate 和标签版本一致。
+
+Windows 应用仍依赖 **Microsoft Edge WebView2 Runtime**（Windows 11 通常已自带）；缺失时需从微软官方安装运行时。免安装指应用自身无需安装，并非将整个浏览器运行时打进单文件。
+
+应用不会把配置、备份或缓存写入 `.exe` 同级目录：仍按现有规则发现 OpenCode 配置，备份位于 `%LOCALAPPDATA%\oc-providers-ctl\backups`，缓存和 WebView2 数据位于 `%LOCALAPPDATA%\dev.ocproviders.ctl`。这不是将所有数据随 U 盘携带的模式。旧安装版与免安装版沿用这些数据路径；如需移除旧版，可通过 Windows「已安装的应用」卸载，之后运行下载的免安装文件。
 
 Linux 产物需要较老构建基线及目标系统启动验证。AppImage 不保证在所有发行版运行，也不消除 glibc、图形栈等兼容约束。
 
-第一版不启用自动更新，不包含 Windows Authenticode 证书。未签名安装包可能触发系统安全警告；请从可信 Release 下载并检查 SHA-256，不建议关闭系统防护绕过。
+第一版不启用自动更新，不包含 Windows Authenticode 证书。未签名应用可能触发系统安全警告；请从可信 Release 下载并检查 SHA-256，不建议关闭系统防护绕过。
 
 ## 设计与兼容性参考
 
