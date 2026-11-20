@@ -182,21 +182,25 @@ fn removing_limit_leaf_from_model_without_limit_still_fails() {
 /// Correction, credit to Forge for spotting the first half of it: the previous
 /// version of this test returned early when the document came back unwritable,
 /// so it asserted nothing at all. And that early return was not a corner case --
-/// it is the only outcome. `provider_has_invalid_types` (config.rs:1085-1090)
-/// treats a non-object `limit` as an invalid type, which sets `unsafe_nesting`,
-/// which makes `is_writable` false, which makes `prepare_changes` bail at the
-/// file-level gate (config.rs:243) before any per-edit validation runs.
+/// it is the only outcome. The type check in `provider_invalid_fields` treats a
+/// non-object `limit` as a shape error, which sets `unsafe_nesting`, which makes
+/// `is_writable` false, which makes `prepare_changes` bail at the file-level gate
+/// (config.rs:243) before any per-edit validation runs.
 ///
 /// The consequence is broader than this one field: the invalid-shape arm of
 /// `validate_creatable_block` is unreachable from all four of its call sites
 /// (limit, capabilities, options, settings), because every one of those fields
-/// is in `provider_has_invalid_types`. So `The `limit` field must be an object.`
-/// cannot currently reach a user, and docs must not describe it as reachable.
+/// is checked by `provider_invalid_fields` first. So `The `limit` field must be
+/// an object.` cannot currently reach a user, and docs must not describe it as
+/// reachable.
 ///
-/// What a user does get is the V1/V2-mixture sentence, which is misleading for
-/// this input: nothing is mixed. This test pins that reality rather than the
-/// intended design, so that whichever of the two gets fixed, it fails loudly and
-/// someone splits it into two cases.
+/// What a user used to get was the V1/V2-mixture sentence, which was misleading
+/// for this input: nothing is mixed. That was fixed: the file is still refused
+/// at the same file-level gate, and the gate is still what refuses it, but the
+/// message now names the field and its expected shape.
+///
+/// The refusal scope is unchanged on purpose. Only the wording moved, so this
+/// test still pins the read-only outcome as well as the message.
 #[test]
 fn a_malformed_limit_block_makes_the_file_read_only_with_the_file_level_message() {
     let source = br#"{
@@ -236,11 +240,18 @@ fn a_malformed_limit_block_makes_the_file_read_only_with_the_file_level_message(
         !err.contains("does not exist"),
         "a wrong-typed parent must not be reported as a missing parent: {err}"
     );
-    assert_eq!(
-        err, "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.",
-        "this is the message users actually get for a non-object `limit`; it says \
-         'unsafe mixture' for a single mistyped scalar, which is why the docs \
-         cannot promise the 'must be an object' wording"
+    assert!(
+        err.contains("`provider.acme.models.bare.limit`"),
+        "the refusal must name the offending field path: {err}"
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the refusal must say what the field should have been: {err}"
+    );
+    assert!(
+        !err.contains("mixture") && !err.contains("mixes"),
+        "a single mistyped field is not a V1/V2 mixture and must not be \
+         described as one: {err}"
     );
 }
 

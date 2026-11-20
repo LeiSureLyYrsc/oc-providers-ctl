@@ -764,16 +764,13 @@ fn removing_an_absent_limit_leaf_is_still_rejected() {
 }
 
 /// A `limit` block whose value is not an object must not be silently
-/// overwritten by a `Set`.
+/// overwritten by a `Set`, and the refusal must name the field.
 ///
-/// Note what actually stops it. `prepare_changes` rejects the whole file at the
-/// `unsafe_nesting` gate before per-edit validation runs, so the more specific
-/// `The `limit` field must be an object.` branch in `validate_creatable_block`
-/// is not what a user sees here -- and is unreachable from this entry point.
-/// `provider_has_invalid_types` already treats a non-object `limit` as an
-/// invalid type, which is what sets `unsafe_nesting`. This test pins the
-/// refusal and the message that really reaches the user; do not read it as
-/// coverage of the specific branch.
+/// The refusal still comes from the file-level read-only gate, not from the
+/// per-edit branch in `validate_creatable_block`, so that more specific
+/// `The `limit` field must be an object.` message remains unreachable from this
+/// entry point. What changed is only the wording: a wrong-typed field is a
+/// shape error and must not be described as a V1/V2 mixture.
 #[test]
 fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
     let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"weird\": { \"name\": \"Weird\", \"limit\": 4096 }\n      }\n    }\n  }\n}\n";
@@ -792,10 +789,18 @@ fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
         !err.contains("does not exist"),
         "an invalid shape must not be reported as a missing parent: {err}"
     );
-    assert_eq!(
-        err, "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.",
-        "the file-level gate is what fires; if this changes, the specific branch \
-         becomes live and this test should be split in two"
+    assert!(
+        !err.contains("mixture") && !err.contains("mixes"),
+        "a single mistyped field is not a V1/V2 mixture and must not be \
+         described as one: {err}"
+    );
+    assert!(
+        err.contains("`provider.acme.models.weird.limit`"),
+        "the refusal must name the offending field path: {err}"
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the refusal must say what the field should have been: {err}"
     );
 }
 
@@ -1390,4 +1395,130 @@ fn dto_shapes_use_camel_case_and_no_raw_config() {
     let serialized = value.to_string();
     assert!(!serialized.contains("v2-inline-secret"));
     assert!(!serialized.contains("\"apiKey\""));
+}
+
+// --- Field-level read-only diagnostics (task #8) -------------------------
+//
+// These three cases are the acceptance set: a wrong-shaped field, a genuine
+// V1/V2 mixture, and both at once. Each one asserts the message names the
+// right cause, and each one asserts the file on disk is untouched, because the
+// whole point of the gate is that a refused edit writes nothing.
+
+const DOTTED_ID_SOURCE: &str = r#"{
+  "provider": {
+    "acme": {
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "gpt-4.1": { "name": "Dotted", "limit": "not-an-object" }
+      }
+    }
+  }
+}
+"#;
+
+#[test]
+fn wrong_shaped_field_is_named_with_its_path_and_expected_type() {
+    let (_dir, path) = write_config("shape.jsonc", DOTTED_ID_SOURCE.as_bytes());
+    let before = read_document(&path).expect("read");
+    assert!(!before.writable, "a wrong-typed field must be read-only");
+
+    let err = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_set(&["model"], json!("acme/x"))],
+    )
+    .expect_err("a read-only file must refuse edits");
+
+    // A model id containing a dot must stay one segment: quoting it is what
+    // stops the path from reading as two extra levels.
+    assert!(
+        err.contains(r#"`provider.acme.models."gpt-4.1".limit`"#),
+        "the dotted model id must be quoted, not split into path levels: {err}"
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the message must say what the field should be: {err}"
+    );
+    assert!(
+        !err.contains("mixture") && !err.contains("mixes"),
+        "a wrong-typed field is not a V1/V2 mixture: {err}"
+    );
+    // The refusal must not write: the bytes on disk are still the fixture.
+    assert_eq!(
+        fs::read_to_string(&path).expect("read back"),
+        DOTTED_ID_SOURCE,
+        "a refused edit must leave the file byte-identical"
+    );
+}
+
+#[test]
+fn genuine_mixture_still_reports_a_mixture_and_names_no_field() {
+    let source = br#"{
+  "providers": {
+    "broken": {
+      "npm": "@ai-sdk/openai-compatible",
+      "package": "@opencode/ai/providers/openai-compatible"
+    }
+  }
+}"#;
+    let (_dir, path) = write_config("mix.jsonc", source);
+    let before = read_document(&path).expect("read");
+    assert!(!before.writable, "a genuine mixture must be read-only");
+
+    let err = prepare_changes(&path, &before.hash, &[edit_set(&["model"], json!("x/y"))])
+        .expect_err("a read-only file must refuse edits");
+
+    // The original sentence is deliberately unchanged for this case: a real
+    // mixture is still a mixture, and existing tooling matches on this wording.
+    assert_eq!(
+        err, "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.",
+        "a genuine mixture keeps its original message"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("read back"),
+        std::str::from_utf8(source).expect("utf-8 fixture"),
+        "a refused edit must leave the file byte-identical"
+    );
+}
+
+#[test]
+fn a_file_with_both_problems_reports_the_field_and_the_mixture() {
+    // Same provider mixes syntax (npm + package) AND has a wrong-typed field,
+    // so the message must carry both, with the field first because that is the
+    // part the user can act on.
+    let source = br#"{
+  "providers": {
+    "broken": {
+      "npm": "@ai-sdk/openai-compatible",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "models": {
+        "m": { "name": "M", "limit": 4096 }
+      }
+    }
+  }
+}"#;
+    let (_dir, path) = write_config("both.jsonc", source);
+    let before = read_document(&path).expect("read");
+    assert!(!before.writable);
+
+    let err = prepare_changes(&path, &before.hash, &[edit_set(&["model"], json!("x/y"))])
+        .expect_err("a read-only file must refuse edits");
+
+    assert!(
+        err.contains("`providers.broken.models.m.limit`"),
+        "the wrong-typed field must be named even when a mixture also exists: {err}"
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the expected shape must be stated: {err}"
+    );
+    assert!(
+        err.contains("mixes V1 and V2"),
+        "the genuine mixture must still be reported, not dropped: {err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("read back"),
+        std::str::from_utf8(source).expect("utf-8 fixture"),
+        "a refused edit must leave the file byte-identical"
+    );
 }
