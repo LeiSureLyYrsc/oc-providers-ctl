@@ -2099,11 +2099,13 @@ fn validate_model_field_edit(
             if edit.op == EditOp::Remove {
                 validate_leaf_exists(model_obj.get_object("limit"), leaf)?;
             } else {
-                // Unreachable from the edit entry point while
-                // `provider_has_invalid_types` treats a non-object `limit` as making
-                // the whole file read-only: `prepare_changes` rejects the file before
-                // this runs. The message is kept because it is what the user should
-                // see once that gate names the offending field instead of the file.
+                // Unreachable from the edit entry point: `provider_has_invalid_types`
+                // treats a non-object `limit` as making the whole file read-only, so
+                // `prepare_changes` rejects the file before this validation runs. That
+                // stays true even once the gate reports the offending field, because a
+                // file-level gate still returns before per-field validation. The message
+                // is kept so this branch still states what is wrong with the block it
+                // inspects.
                 validate_creatable_block(model_obj.get("limit"), || {
                     "The `limit` field must be an object.".to_string()
                 })?;
