@@ -476,8 +476,8 @@ export function ModelEditDialog({
             </div>
           ) : null}
 
-          <div className="field-grid" style={{ marginTop: 14 }}>
-            <label className="field" style={{ marginTop: 0 }}>
+          <div className="field-grid field-grid--limits">
+            <label className="field">
               <span className="field-label">上下文长度（token）</span>
               <input
                 className="input mono"
@@ -495,8 +495,8 @@ export function ModelEditDialog({
                     : `= ${formatTokens(contextValue)} token`}
               </span>
             </label>
-            <label className="field" style={{ marginTop: 0 }}>
-              <span className="field-label">输入上限（token，可选）</span>
+            <label className="field">
+              <span className="field-label">输入上限（token）</span>
               <input
                 className="input mono"
                 inputMode="numeric"
@@ -513,7 +513,7 @@ export function ModelEditDialog({
                     : `= ${formatTokens(inputValue)} token`}
               </span>
             </label>
-            <label className="field" style={{ marginTop: 0 }}>
+            <label className="field">
               <span className="field-label">输出上限（token）</span>
               <input
                 className="input mono"

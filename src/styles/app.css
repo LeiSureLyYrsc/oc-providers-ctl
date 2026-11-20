@@ -256,10 +256,11 @@ button:disabled {
 }
 
 .workspace {
+  --pane-gutter: 16px;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-columns: clamp(248px, 33.333%, 368px) minmax(0, 1fr);
 }
 
 /* --------------------------------------------------------------- surfaces */
@@ -280,12 +281,15 @@ button:disabled {
   background: var(--surface);
 }
 
-.pane-head {
+.pane-head,
+.detail-head {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 16px 10px;
+  gap: 12px;
+  min-height: 88px;
+  padding: 12px var(--pane-gutter);
+  border-bottom: 1px solid var(--outline-variant);
 }
 
 .pane-head h2 {
@@ -309,7 +313,7 @@ button:disabled {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 12px 16px;
+  padding: 0 var(--pane-gutter) 16px;
 }
 
 /* ------------------------------------------------------------- controls */
@@ -421,7 +425,7 @@ button:disabled {
   gap: 8px;
   height: var(--control-h);
   padding: 0 12px;
-  margin: 0 16px 10px;
+  margin: 12px var(--pane-gutter);
   border: 1px solid var(--outline-variant);
   border-radius: var(--radius-pill);
   background: var(--surface-2);
@@ -654,15 +658,6 @@ button:disabled {
   flex-direction: column;
 }
 
-.detail-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  padding: 18px 20px 14px;
-  border-bottom: 1px solid var(--outline-variant);
-}
-
 .detail-head .detail-title {
   flex: 1;
   min-width: 0;
@@ -693,7 +688,11 @@ button:disabled {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 8px 20px 24px;
+  padding: 12px var(--pane-gutter) 24px;
+}
+
+.detail-body > .card:first-child {
+  margin-top: 0;
 }
 
 /* Sections read as tonal cards, no borders unless interactive. */
@@ -808,8 +807,18 @@ button:disabled {
 
 .field-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field-grid--limits {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.field-grid > .field {
+  min-width: 0;
+  margin-top: 0;
 }
 
 .field-actions {
@@ -1347,10 +1356,6 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
-  .workspace {
-    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
-  }
-
   .appbar-title .sub {
     display: none;
   }
@@ -1358,6 +1363,70 @@ button:disabled {
   .config-picker select {
     min-width: 160px;
     max-width: 220px;
+  }
+}
+
+@media (max-width: 700px) {
+  .appbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .config-picker {
+    flex: 1 0 100%;
+    order: 1;
+  }
+
+  .config-picker select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .workspace {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .pane {
+    flex: 0 0 auto;
+  }
+
+  .pane-left {
+    border-right: 0;
+    border-bottom: 1px solid var(--outline-variant);
+  }
+
+  .pane-head,
+  .detail-head {
+    min-height: 64px;
+  }
+
+  .pane-scroll {
+    max-height: 160px;
+  }
+
+  .detail-body {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 580px) {
+  .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 440px) {
+  .dialog-head,
+  .dialog-body,
+  .dialog-actions {
+    padding-inline: 16px;
+  }
+
+  .dialog-actions .btn {
+    padding-inline: 12px;
   }
 }
 
