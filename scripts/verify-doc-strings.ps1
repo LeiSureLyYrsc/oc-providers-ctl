@@ -1,12 +1,12 @@
 #!/usr/bin/env pwsh
-# Verify that every verbatim error quoting in docs/ still exists in the Rust source.
+# Verify that each eligible error excerpt in docs/ still appears in the Rust source.
 #
 # Rationale: docs/config-editing.md promises "提示原文取自 config.rs". That promise
 # decays the moment someone rewords an error string. This script makes the decay a
 # failing check instead of a quietly wrong document.
 #
 # SCOPE - what this check does and does not prove (read before trusting it):
-#   PROVES:   each quoted sentence still exists somewhere in the Rust source.
+#   PROVES:   each checked excerpt still appears somewhere in the Rust source.
 #   DOES NOT: that the sentence appears under the condition the doc claims, or that
 #             the advice next to it is right. A message can be raised from several
 #             places; this script cannot tell which one a user hit. Treat a green run
@@ -23,7 +23,7 @@
 # Usage (from anywhere):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-doc-strings.ps1
 #
-# Exit 0 = every quoted string found in source. Exit 1 = at least one is unverified
+# Exit 0 = every checked excerpt found in source. Exit 1 = at least one is unverified
 #          or the self-test failed.
 
 $ErrorActionPreference = 'Stop'
@@ -87,11 +87,8 @@ function Get-QuotedErrorLiterals {
         foreach ($m in [regex]::Matches($text, $pattern)) {
             # Group 1 already excludes the surrounding backticks.
             # A message that quotes a field name, like "A `remove` edit ...", keeps
-            # its INNER backticks: stripping them made the comparison impossible.
-            # Markdown escaping: such a literal is written as \` in the doc so the
-            # code span renders, while the source has a bare backtick. Undo the
-            # escape before comparing; an already-bare backtick is left alone.
-            $literal = ($m.Groups[1].Value -replace '\\`', '`').Trim()
+            # its inner backticks. In Markdown, wrap it in a double-backtick span.
+            $literal = $m.Groups[1].Value.Trim()
             # An error message has whitespace; identifiers and paths do not.
             if ($literal -notmatch '\s') { continue }
             # Skip placeholders: the source has format!() templates, so {..} and <..>
@@ -107,10 +104,10 @@ function Get-QuotedErrorLiterals {
 # deliberate negative case, the next person sees a green run and never learns
 # whether it could have gone red. So we prove the matcher rejects an absent string
 # on every single run, using the same function as the real check.
-$selfTestSource = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
+$source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
 
 $sentinel = 'This sentence is deliberately absent from the source tree.'
-if (Test-LiteralPresent -Source $selfTestSource -Literal $sentinel) {
+if (Test-LiteralPresent -Source $source -Literal $sentinel) {
     Write-Output "SELF-TEST FAILED: the sentinel literal unexpectedly exists in source; pick a new one."
     exit 1
 }
@@ -133,8 +130,6 @@ if (-not (Test-LiteralPresent -Source $caseSource -Literal 'The limit field must
 Write-Output "Self-test OK: matching is case-sensitive and still finds exact text."
 
 # --- Real check ------------------------------------------------------------
-$source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
-
 $docs = Get-ChildItem $docsDir -Filter *.md -File
 $literals = @(Get-QuotedErrorLiterals -Docs $docs)
 $missing = @()

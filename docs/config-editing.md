@@ -227,7 +227,7 @@ V2 的思考能力是**对象**，不是布尔值：
 | `Only provider, model and default-model paths may be edited.` | 路径第一段必须是 `provider`、`providers` 或 `model`。其它顶层键一律不可编辑。 |
 | `The same path appears in more than one edit.` | 同一次批量里重复写了同一个路径。去掉重复的那条。 |
 | `A set edit requires a value.` | `set` 必须带值。 |
-| `A \`remove\` edit must not include a value.` | `remove` 不能带值。 |
+| ``A `remove` edit must not include a value.`` | `remove` 不能带值。 |
 
 ### 类别 B — 这个方言不支持这个字段
 
@@ -686,30 +686,14 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 > （见上「第一道门」）。只有当它们通过 OpenAI 兼容包接入、并且真的收到了这类响应，
 > 下面的分页结论才适用。
 
-#### Anthropic 会不会截断：不知道，但有提示
+#### Anthropic 的默认页大小与截断提示
 
-**本文不给条数。** 用「官方退役状态表有几行」推算 `/v1/models` 会返回几条，是【推】不是【测】——
-状态表可能包含端点不返回的条目，而且这个数每次发版都会变。**写一个会过期又没被测过的数字，比不写更糟**：
-读者会拿它当"已确认"。
+官方 `/v1/models` 的默认页大小为 20。工具只请求第一页，看到 `has_more: true` 时会显示列表可能截断的提示。
+没有提示只表示工具没有识别到分页信号。兼容网关可能使用不同的分页字段。
 
-**能确定的是默认页大小 20 与截断提示**：
+如需添加第一页以外的模型，请手工填写模型 ID。
 
-- `/v1/models` 不传 `limit` 时默认返回 20 条。
-- 如果响应里带 `has_more: true`（Anthropic 用这个字段），工具**能识别**，并给出结局 3 那条 warning。
-- 但**工具不翻页**——你拿到的仍只有第一页。
-
-> **当前页是否完整，只看这一次响应里有没有触发截断提示。**
-> 看到 warning 就是不全；**没看到 warning 不能反推「这一页是完整的」**——
-> 它只说明响应里没有被识别的信号。供应商可能用了未识别的分页字段（见上表），也可能根本没实现 `/models`。
->
-> **工具只取第一页，不会按游标翻页。** 分页字段只用来判断"要不要提示你"，不用来继续取数据。
-
-**处置**：**工具不会替你翻页，也不发送 `limit` 参数**——URL 里的查询串在构造请求时会被清空。
-所以拿到的就是对方默认返回的第一页：**缺的模型请手工补上模型 ID**，不要在配置里等它自动补齐。
-
-### Anthropic 接入的两条已知限制
-
-下面两条是**用户会踩到**的，不是实现细节。第 1 条与他家共用，只是 Anthropic 最容易踩。
+### Anthropic 接入的已知限制
 
 #### 1. baseURL 只写域名会 404（Anthropic 尤其容易踩）
 
@@ -734,7 +718,7 @@ baseURL 的路径非空  →  <baseURL>/models
 于是更容易去怀疑 key，而不是怀疑 URL。
 
 > **处置**：看到「Provider returned HTTP 404 Not Found.」这条（由 `Provider returned HTTP {status} {reason}.` 填出的实例）且 baseURL 只有域名时，
-> 先补上 `/v1` 再查别的。**其他四家的默认 base 都自带 `/v1`，所以这条几乎只在手写配置时出现。**
+> 先检查 `baseURL` 是否包含 `/v1`。内置 Anthropic 默认地址已包含该路径。
 
 > 【测】+【码】：路径怎么拼是【码】（上面的规则）；
 > `/v1/models` 存在、`/models` 与 `/v1/messages/models` 不存在，
@@ -764,7 +748,7 @@ baseURL 的路径非空  →  <baseURL>/models
 | `https://api.example.com/v1?page=2&limit=10` | `/v1/models`（query 全没了） |
 
 **所以不要指望用 `?limit=1000` 之类去影响分页**——传不进去，而且**不会有任何提示**。
-分页由程序自己按响应里的游标走。
+工具只取第一页，响应中的分页信号用于显示提示。
 
 > 这两条（base 补 `/models`、query 被清）**是同一类问题**：你以为自己传了个东西，
 > 它被静默丢掉了。**静默丢弃比报错更难诊断**，因为报错至少给了你一个信号。
