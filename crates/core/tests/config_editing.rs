@@ -783,6 +783,10 @@ fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
         !err.contains("does not exist"),
         "an invalid shape must not be reported as a missing parent: {err}"
     );
+    assert_eq!(
+        err, "The `limit` field must be an object.",
+        "the malformed-block message must stay specific"
+    );
 }
 
 /// `capabilities.reasoning` must follow the same create-on-Set rule as `limit`,

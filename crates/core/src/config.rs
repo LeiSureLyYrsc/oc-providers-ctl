@@ -2099,7 +2099,9 @@ fn validate_model_field_edit(
             if edit.op == EditOp::Remove {
                 validate_leaf_exists(model_obj.get_object("limit"), leaf)?;
             } else {
-                validate_creatable_block(model_obj.get("limit"), "limit")?;
+                validate_creatable_block(model_obj.get("limit"), || {
+                    "The `limit` field must be an object.".to_string()
+                })?;
             }
             Ok(())
         } else if field == "capabilities" && leaf == "reasoning" && dialect == Dialect::V2 {
@@ -2109,7 +2111,9 @@ fn validate_model_field_edit(
             if edit.op == EditOp::Remove {
                 validate_leaf_exists(model_obj.get_object("capabilities"), leaf)?;
             } else {
-                validate_creatable_block(model_obj.get("capabilities"), "capabilities")?;
+                validate_creatable_block(model_obj.get("capabilities"), || {
+                    "The `capabilities` field must be an object.".to_string()
+                })?;
             }
             Ok(())
         } else {
@@ -2166,11 +2170,9 @@ fn apply_base_url_leaf(container: Option<&JObject>, key: &str, edit: &Edit) -> R
 }
 
 fn validate_container_parent(provider: &JObject, key: &str) -> Result<(), String> {
-    match provider.get(key) {
-        None => Ok(()),
-        Some(prop) if prop.value.as_object().is_some() => Ok(()),
-        Some(_) => Err(format!("The provider `{key}` field has an invalid shape.")),
-    }
+    validate_creatable_block(provider.get(key), || {
+        format!("The provider `{key}` field has an invalid shape.")
+    })
 }
 
 fn validate_leaf_exists(parent: Option<&JObject>, key: &str) -> Result<(), String> {
@@ -2181,16 +2183,22 @@ fn validate_leaf_exists(parent: Option<&JObject>, key: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// A `Set` on a leaf whose parent block is absent is allowed: the write path
-/// scaffolds missing intermediate objects for supported creation paths. An
-/// absent parent and a parent of the wrong shape stay separate outcomes -- only
-/// the former is creatable, the latter is a malformed file that must be refused
-/// rather than silently replaced.
-fn validate_creatable_block(parent: Option<&JObjectProp>, label: &str) -> Result<(), String> {
+/// Shared shape rule for a block that a `Set` is allowed to create.
+///
+/// An absent block is creatable: the write path scaffolds missing intermediate
+/// objects for supported creation paths, and validation must not be stricter
+/// than the writer. A block that exists with the wrong shape is a malformed
+/// file, and stays a separate outcome that is refused rather than silently
+/// replaced -- otherwise "I left it out" and "my file is broken" would report
+/// the same thing and the user could not tell them apart.
+fn validate_creatable_block(
+    parent: Option<&JObjectProp>,
+    invalid_shape: impl FnOnce() -> String,
+) -> Result<(), String> {
     match parent {
         None => Ok(()),
         Some(prop) if prop.value.as_object().is_some() => Ok(()),
-        Some(_) => Err(format!("The `{label}` field must be an object.")),
+        Some(_) => Err(invalid_shape()),
     }
 }
 
