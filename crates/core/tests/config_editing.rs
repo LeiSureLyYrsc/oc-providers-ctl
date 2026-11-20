@@ -836,6 +836,67 @@ fn capabilities_reasoning_is_creatable_and_removal_stays_strict() {
     commit_changes(&err).expect("commit removal");
 }
 
+/// Adding a second limit leaf to a model that already has one must work too.
+///
+/// This is the same `validate_leaf_exists` call producing a *different*
+/// message than the empty-model case: a user who already filled one limit sees
+/// "The requested leaf field does not exist." instead of "The parent object
+/// does not exist.". Pinning it separately stops a future refactor from
+/// restoring the strict check on `Set` while the empty-model test stays green.
+#[test]
+fn adding_a_second_limit_leaf_keeps_the_existing_sibling() {
+    let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"half\": { \"name\": \"Half\", \"limit\": { \"context\": 32000 } }\n      }\n    }\n  }\n}\n";
+    let (_dir, path) = write_config("half-limit.jsonc", source);
+    let before = read_document(&path).expect("read");
+    let prepared = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_set(
+            &["provider", "acme", "models", "half", "limit", "output"],
+            json!(4096),
+        )],
+    )
+    .expect("adding a second limit leaf must be allowed");
+    commit_changes(&prepared).expect("commit second leaf");
+    let text = fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("\"context\": 32000"),
+        "existing sibling must survive: {text}"
+    );
+    assert!(
+        text.contains("\"output\": 4096"),
+        "new leaf written: {text}"
+    );
+}
+
+/// Two limit leaves created in one batch, in either order, must both land.
+#[test]
+fn a_batch_can_create_two_limit_leaves_in_either_order() {
+    for paths in [
+        [
+            ["provider", "acme", "models", "bare", "limit", "context"],
+            ["provider", "acme", "models", "bare", "limit", "output"],
+        ],
+        [
+            ["provider", "acme", "models", "bare", "limit", "output"],
+            ["provider", "acme", "models", "bare", "limit", "context"],
+        ],
+    ] {
+        let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"bare\": { \"name\": \"Bare\" }\n      }\n    }\n  }\n}\n";
+        let (_dir, path) = write_config("batch-limit.jsonc", source);
+        let before = read_document(&path).expect("read");
+        let edits = vec![
+            edit_set(&paths[0], json!(64000)),
+            edit_set(&paths[1], json!(2048)),
+        ];
+        let prepared = prepare_changes(&path, &before.hash, &edits).expect("batch create limit");
+        commit_changes(&prepared).expect("commit batch");
+        let text = fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("\"context\": 64000"), "context in: {text}");
+        assert!(text.contains("\"output\": 2048"), "output in: {text}");
+    }
+}
+
 #[test]
 fn model_and_provider_creation_are_scaffolded_safely() {
     let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\"\n    }\n  }\n}\n";
