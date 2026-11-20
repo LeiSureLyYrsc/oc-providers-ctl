@@ -401,9 +401,7 @@ fn protocol_for_package(package: &str) -> Option<OpenAiProtocol> {
         // Anthropic's native Messages API. The package list is verified against
         // https://opencode.ai/docs/providers/ ("Native package options").
         "@opencode/ai/providers/anthropic" => Some(OpenAiProtocol::Anthropic),
-        "@opencode/ai/providers/anthropic-compatible" => {
-            Some(OpenAiProtocol::AnthropicCompatible)
-        }
+        "@opencode/ai/providers/anthropic-compatible" => Some(OpenAiProtocol::AnthropicCompatible),
         _ => None,
     }
 }
@@ -497,9 +495,9 @@ fn with_protocol_default_headers(
     if !protocol.is_anthropic() {
         return configured;
     }
-    let has_version = configured.iter().any(|(name, _)| {
-        name.trim().eq_ignore_ascii_case(ANTHROPIC_VERSION_HEADER)
-    });
+    let has_version = configured
+        .iter()
+        .any(|(name, _)| name.trim().eq_ignore_ascii_case(ANTHROPIC_VERSION_HEADER));
     if !has_version {
         configured.push((
             ANTHROPIC_VERSION_HEADER.to_string(),

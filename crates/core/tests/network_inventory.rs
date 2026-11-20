@@ -943,7 +943,10 @@ async fn anthropic_compatible_without_a_base_url_is_refused_before_any_request()
         error.contains("does not define a base URL"),
         "unexpected error: {error}"
     );
-    assert!(!error.contains("sk-gateway-secret"), "credential leak: {error}");
+    assert!(
+        !error.contains("sk-gateway-secret"),
+        "credential leak: {error}"
+    );
 
     // Most importantly: no credential was sent anywhere.
     assert!(
