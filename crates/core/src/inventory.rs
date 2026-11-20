@@ -1166,5 +1166,27 @@ mod tests {
         // A false flag must not be read as "more available".
         assert!(!has_more(r#"{"has_more":false}"#));
         assert!(!has_more(r#"{"pagination":{"has_more":false}}"#));
+
+        // Known coarseness, pinned as current behavior rather than as correct
+        // behavior: the test is `!is_null()`, not "non-empty", so an empty
+        // string counts as a signal. There is no evidence that any provider
+        // sends `next: ""`, and no evidence rules it out. The bias is
+        // deliberate - a spurious "may be truncated" warning costs the user a
+        // glance, while a missed one loses models silently - so this stays.
+        // If someone tightens it to `trim()`, this assertion fails and the
+        // documentation must be updated in the same change.
+        assert!(has_more(r#"{"next":""}"#));
+
+        // Any signal wins; has_more is not consulted as a prior. False plus a
+        // live continuation marker still means more data, which is the real
+        // shape of a provider mid-migration: the old flag stays for
+        // compatibility and is pinned to false while the new field fills in.
+        // This assertion exists to stop a refactor to `if has_more { .. } else
+        // if next { .. }`, which reads like a cleanup but would silently demote
+        // every provider that only sends `next` from warned to unwarned.
+        assert!(
+            has_more(r#"{"has_more":false,"next":"cursor-1"}"#),
+            "a live continuation marker must outweigh a false flag"
+        );
     }
 }
