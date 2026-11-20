@@ -175,11 +175,30 @@ fn removing_limit_leaf_from_model_without_limit_still_fails() {
     );
 }
 
-/// Removing an existing key from an existing, but differently-shaped, parent
-/// must report a shape problem, not "does not exist". Bridge flagged this
-/// distinction; it needs its own case.
+/// A `limit` block of the wrong type must be refused, and this pins **what the
+/// user actually sees when it is** -- which is not the message the name of this
+/// test used to promise.
+///
+/// Correction, credit to Forge for spotting the first half of it: the previous
+/// version of this test returned early when the document came back unwritable,
+/// so it asserted nothing at all. And that early return was not a corner case --
+/// it is the only outcome. `provider_has_invalid_types` (config.rs:1085-1090)
+/// treats a non-object `limit` as an invalid type, which sets `unsafe_nesting`,
+/// which makes `is_writable` false, which makes `prepare_changes` bail at the
+/// file-level gate (config.rs:243) before any per-edit validation runs.
+///
+/// The consequence is broader than this one field: the invalid-shape arm of
+/// `validate_creatable_block` is unreachable from all four of its call sites
+/// (limit, capabilities, options, settings), because every one of those fields
+/// is in `provider_has_invalid_types`. So `The `limit` field must be an object.`
+/// cannot currently reach a user, and docs must not describe it as reachable.
+///
+/// What a user does get is the V1/V2-mixture sentence, which is misleading for
+/// this input: nothing is mixed. This test pins that reality rather than the
+/// intended design, so that whichever of the two gets fixed, it fails loudly and
+/// someone splits it into two cases.
 #[test]
-fn invalid_shape_is_distinct_from_missing() {
+fn a_malformed_limit_block_makes_the_file_read_only_with_the_file_level_message() {
     let source = br#"{
   "provider": {
     "acme": {
@@ -192,28 +211,37 @@ fn invalid_shape_is_distinct_from_missing() {
 }
 "#;
     let (_dir, path) = write_config("opencode.jsonc", source);
-    let Ok(doc) = read_document(&path) else {
-        // A wrong-typed limit may make the file read-only; that is also an
-        // acceptable outcome, but then it must not be writable.
-        return;
-    };
-    if !doc.writable {
-        return;
-    }
-    let result = prepare_changes(
+    let doc = read_document(&path).expect("a wrong-typed limit still parses");
+
+    // Asserted explicitly, not skipped. This is the behaviour that matters.
+    assert!(
+        !doc.writable,
+        "a non-object `limit` must make the file read-only; if this ever becomes \
+         writable, the specific shape message becomes reachable and this test \
+         should be split into the read-only case and a message case"
+    );
+
+    let err = prepare_changes(
         &path,
         &doc.hash,
         &[edit_set(
             &["provider", "acme", "models", "bare", "limit", "context"],
             json!(1000),
         )],
+    )
+    .expect_err("an edit to a read-only file must be refused");
+
+    // The real message, and the fact that it never claims a missing parent.
+    assert!(
+        !err.contains("does not exist"),
+        "a wrong-typed parent must not be reported as a missing parent: {err}"
     );
-    if let Err(err) = result {
-        assert!(
-            !err.contains("The parent object does not exist."),
-            "a wrong-typed parent must not be reported as missing: {err}"
-        );
-    }
+    assert_eq!(
+        err, "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.",
+        "this is the message users actually get for a non-object `limit`; it says \
+         'unsafe mixture' for a single mistyped scalar, which is why the docs \
+         cannot promise the 'must be an object' wording"
+    );
 }
 
 /// Batch case: several limit leaves added to a model with no `limit` at all.
