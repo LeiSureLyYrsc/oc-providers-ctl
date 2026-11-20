@@ -543,7 +543,17 @@ async fn mock_server_serves_two_sequential_statuses_in_order() {
         .await
         .expect("second response is 200");
     assert_eq!(second.model_ids, vec!["ok"]);
-    assert_eq!(server.request_count(), 2);
+
+    // The server records a request only after it has written the response, so
+    // the client can return before the second request is counted. Wait for the
+    // count instead of asserting it immediately: the property under test is
+    // that two responses were served in order, not that the server has already
+    // finished recording by the time the client returns.
+    assert!(
+        server.wait_for_requests(2, Duration::from_secs(2)),
+        "expected two requests, saw {}",
+        server.request_count()
+    );
 }
 
 #[tokio::test]
