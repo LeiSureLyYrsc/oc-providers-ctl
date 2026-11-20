@@ -825,3 +825,233 @@ fn provider_inventory_dto_uses_camel_case() {
     assert!(json.get("modelIds").is_some());
     assert!(json.get("fetchedAt").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Anthropic support
+// ---------------------------------------------------------------------------
+
+/// Anthropic's native models endpoint: the package is recognised, the response
+/// container and ID key match the OpenAI shape, and the request carries the
+/// version header the API requires.
+#[tokio::test]
+async fn anthropic_package_uses_the_native_endpoint_and_sends_a_version_header() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{
+            "data": [
+                {"type": "model", "id": "claude-opus-5-5", "display_name": "Opus"},
+                {"type": "model", "id": "claude-sonnet-5"}
+            ],
+            "has_more": false,
+            "first_id": "claude-opus-5-5",
+            "last_id": "claude-sonnet-5"
+        }"#,
+    )]);
+    let config_path = config_with(
+        &directory,
+        "anthropic.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic", "settings": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-inline" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("inventory");
+    assert_eq!(
+        inventory.model_ids,
+        vec!["claude-opus-5-5", "claude-sonnet-5"]
+    );
+    // Two models is far below the page size, so nothing must claim truncation.
+    // IDs come back sorted (`extract_model_ids` sorts and dedups), which is why
+    // the assertion below is in alphabetical order rather than API order.
+    assert!(
+        !inventory
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("truncated")),
+        "unexpected truncation warning: {:?}",
+        inventory.warnings
+    );
+    assert_no_secret(&inventory, "sk-ant-inline");
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/v1/models");
+    assert_eq!(
+        requests[0].header("anthropic-version"),
+        Some("2026-10-21"),
+        "Anthropic requires a version header"
+    );
+    // Bearer is the documented primary authentication path.
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-ant-inline")
+    );
+}
+
+/// The caller's `anthropic-version` wins over the built-in default: a user
+/// pinned to an older API version must not be silently upgraded.
+#[tokio::test]
+async fn a_configured_anthropic_version_overrides_the_default() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-pinned.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic", "settings": {{ "baseURL": "{}/v1", "headers": {{ "anthropic-version": "2023-06-01" }} }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let _ = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("inventory");
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].header("anthropic-version"), Some("2023-06-01"));
+}
+
+/// A gateway that speaks the Anthropic protocol must declare its own base URL.
+/// Falling back to the official domain would send a gateway credential to
+/// Anthropic itself, so this is refused before any request is made.
+#[tokio::test]
+async fn anthropic_compatible_without_a_base_url_is_refused_before_any_request() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-compatible.json",
+        "providers",
+        "gateway",
+        r#"{ "package": "@opencode/ai/providers/anthropic-compatible", "settings": { "apiKey": "sk-gateway-secret" } }"#,
+    );
+
+    let error = fetch_inventory(&config_path, "gateway")
+        .await
+        .expect_err("a gateway must not inherit the official Anthropic endpoint");
+    assert!(
+        error.contains("does not define a base URL"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.contains("sk-gateway-secret"), "credential leak: {error}");
+
+    // Most importantly: no credential was sent anywhere.
+    assert!(
+        server.requests().is_empty(),
+        "no request may be made: {:?}",
+        server.requests()
+    );
+}
+
+/// A request that already carries a credential must not gain a generated
+/// `Authorization: Bearer` as well. Two credentials make Anthropic answer 401
+/// ("carries more than one credential"), and other providers may silently
+/// ignore one of them, which looks like a bad key.
+#[tokio::test]
+async fn a_configured_x_api_key_is_not_accompanied_by_a_generated_bearer() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-x-api-key.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic", "settings": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-also-resolvable", "headers": {{ "x-api-key": "sk-ant-explicit" }} }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let _ = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("inventory");
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-explicit"));
+    assert_eq!(
+        requests[0].header("authorization"),
+        None,
+        "a second credential must not be added: {:?}",
+        requests[0].headers
+    );
+}
+
+/// An unknown package still gets the documented refusal, and the message now
+/// names both supported families instead of claiming OpenAI is the only one.
+#[tokio::test]
+async fn an_unsupported_package_names_both_supported_families() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "unknown-package.json",
+        "providers",
+        "mystery",
+        &format!(
+            r#"{{ "package": "@acme/mystery-sdk", "settings": {{ "baseURL": "{}/v1" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let error = fetch_inventory(&config_path, "mystery")
+        .await
+        .expect_err("an unknown package must be refused");
+    assert!(
+        error.contains("OpenAI and Anthropic"),
+        "the message must name both families: {error}"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no request may be made for an unknown package"
+    );
+}
+
+/// Anthropic reports `has_more` when a page is not the whole list. Today the
+/// code detects it and warns rather than paginating, so the warning is the
+/// contract this test pins.
+#[tokio::test]
+async fn anthropic_truncated_page_produces_an_explicit_warning() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{
+            "data": [{"type": "model", "id": "claude-a"}, {"type": "model", "id": "claude-b"}],
+            "has_more": true,
+            "first_id": "claude-a",
+            "last_id": "claude-b"
+        }"#,
+    )]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-truncated.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic", "settings": {{ "baseURL": "{}/v1" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("inventory");
+    assert_eq!(inventory.model_ids, vec!["claude-a", "claude-b"]);
+    assert!(
+        inventory
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("may be truncated")),
+        "a partial page must warn rather than pass silently: {:?}",
+        inventory.warnings
+    );
+}
