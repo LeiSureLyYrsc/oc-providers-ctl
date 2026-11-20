@@ -16,13 +16,14 @@
   模型没有 `limit` 对象时，给 `limit.context` / `limit.input` / `limit.output` 执行 `set` 会被校验拒绝，
   而写回层本来就会为受支持的创建路径自动补全缺失的中间对象。
   现在 `set` 允许父对象不存在，`remove` 仍要求它存在。
-- **父对象“不存在”与“类型不对”的提示已分开**（`validate_creatable_block`）。
-  **但“类型不对”的那两句目前用户到不了。** 一份 `limit` 不是对象的文件，在走到该分支之前，
-  已被 `provider_has_invalid_types` 判为无效类型、置 `unsafe_nesting`，由 `prepare_changes`
-  直接返回 `This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.`。
-  **保留该只读边界是刻意的决定（2026-11-20）**：此类文件本就不合法，要求先修源文件更保守。
-  因此这次**真正交付给用户的是 `set` 允许父对象缺失**；“形状错 / 不存在”的区分目前不可达，
-  **不要把它算作本版收益**。对应的测试断言已收紧为精确措辞（避免“不等于某句就算过”的假绿）。
+- **父对象「不存在」与「类型不对」的提示已分开**（`validate_creatable_block` 一侧，见 `a97abc0`）。
+- **源文件里字段类型不对时，提示会指出具体路径和期望类型**（#13）。
+  以前这类文件只会返回一句笼统的 `This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.`——它说的是「你混用了两种方言」，而真正的问题通常只是某个字段的标量类型写错，**提示是误导性的**。
+  例如，``The configuration field `providers.acme.models.m.limit` must be an object.``
+  **文件仍然只读**：保留只读边界是刻意的决定（2026-11-20），这次改的是**提示能不能定位**，不是**该不该拒绝**——门禁顺序没有重排。
+  - 一次最多逐条点名 4 个字段，其余合并成 `N more field(s) in this file have an invalid shape.`，计数是**按文件**算的，不是按 provider 算。
+  - 过长的路径在中间截断，用 `…` 表示省略；**路径开头和末尾的字段名仍会保留**。含 `.` 的键（例如带点的模型 ID）会被引号包住，所以不会被读成多两层嵌套。
+  - 源文件仅有 V1/V2 方言混用时，仍会出现原来的 `unsafe mixture` 提示。混用与字段类型错误并存时，拒写提示会列出两种原因。
 - **`capabilities.reasoning` 同步到同一规则**，同时修掉一个反向问题：原来删除一个不存在的 `reasoning` 叶子会**静默通过**。
 - 补了对应回归测试（`crates/core/tests/config_editing.rs`），覆盖第二个 limit 叶子与批量编辑场景（`684662c`）。
 

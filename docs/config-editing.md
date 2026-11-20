@@ -263,83 +263,83 @@ V2 的思考能力是**对象**，不是布尔值：
 | --- | --- | --- | --- |
 | **删除**一个值 | 这句话 | ✅ 正常行为：要删的东西父级不存在 | 刷新后重试；检查路径是否写错 |
 | **删除**一个值，文件刚被外部改过 | 这句话 | 文件里的位置和预期不符 | 重新载入文件再操作，**不要**手工去"补"父对象 |
-| **设置** `limit.*` | 这句话 | ⚠️ **用的是修复前的版本** | 见下：这不是文件损坏，别重建文件 |
-| **设置** `limit.*` | `This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.` | ⚠️ **可能原因之一**：文件里 `limit` 不是对象。**但也可能是别的原因**——见下方说明 | 先按文件级只读提示处理：人工检查源文件。**不要**据此断定就是 `limit` 的问题 |
-| **设置** `limit.*` | `The `limit` field must be an object.` | 同上，但这条**目前到不了用户** | 见下面「关于 must be an object 这句」 |
-| **设置** `limit.*` | 成功 | 新版本，正常 | — |
-
-> **`unsafe mixture … read-only` 不是 `limit` 的专属提示。** 这条通用只读提示有多个触发源：
-> ① 同一 provider 里混用 V1/V2 方言；② **任何**字段类型不对——不只是 `limit`，
-> `options` / `settings` / `headers` / `body` 非对象、`env` 不是数组，都会触发同一条；
-> ③ provider 条目本身不是对象。
->
-> 所以看到它**不能反推是哪里错了**，只能知道「这个文件当前不可编辑」。
-> 这正是保留只读边界（2026-11-20 决定）的代价：拒绝范围大，定位靠人。
->
-> 将来的改进方向是让提示指出具体字段路径；届时本节会改。
->
-> **更糟的一点**：这份文件的 provider 条目可能**方言完全正常**，只是某个标量类型写错，
-> 但提示说的是「unsafe **mixture** of V1 and V2」——**它在说你混用了两种方言，而你没有。**
-> 所以这条提示对「单字段类型错」这个输入是**误导性的**，不只是不够具体：
-> 用户会去怀疑自己是不是写错了 `npm`/`package`，而真正的问题在别处。
->
-> 相关测试的注释里记了这一点，并说明「这个测试锁的是现实，不是设计」——
-> 将来无论是提示措辞改了还是门禁顺序改了，它都会红，提醒把它拆成两条。
-
-> **最重要的两条，请只记这两条：**
-> 1. **删除**时看到这句话 = 正确行为，说明要删的东西父级本来就不在。
-> 2. **设置**上限值时看到这句话 = **修复前的已知问题**，**不是你的配置文件坏了**。别重建文件。
->    见 `CHANGELOG.md` 的 `[Unreleased]`。
+| **设置** `limit.*`，源文件里 `limit` 不是对象 | ``The configuration field `{}` must be {expected}.``（会指出具体路径） | ⚠️ 源文件坏了 | 按提示的路径改源文件，改完再编辑 |
+| **设置** `limit.*`，源文件健康 | 成功 | 正常 | — |
 
 > **不要靠版本号判断**：修复前后应用版本号同为 `0.1.0`，比对版本号得不出结论。
 > 上面那张表只依赖「你做了什么」+「程序吐了哪句话」，这两个都不会骗你。
 > 首次包含该修复的发布版本确定后，`CHANGELOG.md` 会回填版本号。
 
-#### 关于 `The `limit` field must be an object.` 这句
+#### 源文件里的字段类型错，现在会指出具体路径
 
-> **这两句是 PR #1 新引入的，不是存量。** 它们由 `b189b82`（提取 `validate_creatable_block` 共用规则）写进代码，
-> 旧版本里没有这两条字符串。**新增之后从编辑入口到不了**——也就是说，它们目前是**写了但永远不会执行**的出口。
-> 这不是行为缺陷（用户看到的仍是被遮蔽后的只读提示），但**别把它当成"一直如此的既有现象"**。
-
-**这条错误目前用户基本看不到。** 代码里存在这个分支，但一份 `"limit": 4096`（不是对象）的文件，
-在走到这个校验**之前**就已经被判定为**整只文件只读**了：
+某个字段类型不对时，不会再笼统地说「你混用了 V1/V2 语法」——它会给出**路径**和**期望类型**：
 
 ```
-provider_has_invalid_types：limit 不是对象 → 标记无效类型
-        ↓
-unsafe_nesting = true
-        ↓
-prepare_changes：直接返回，不进入任何字段校验
-        → "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only."
+The configuration field `providers.acme.models."gpt-4.1".limit` must be an object.
+Fix the listed field(s) before editing this file.
 ```
 
-所以实际会看到的是**那句只读警告**，不是这一句。两者处置相同（都去人工修源文件），
-但**别按 `must be an object` 去搜**，你会搜不到。
+- **路径里的双引号是故意的。** 含 `.`（或其他不在 `A-Z a-z 0-9 _ - / : @` 里的字符）的键会被引号包住，
+  **所以带点的模型 ID 算一段，不会被读成多两层的嵌套**。
+- **不是所有坏字段都会逐条点名。** 前面是几条点名的句子，后面跟一句计数：
+  `2 more field(s) in this file have an invalid shape.`——**`field(s)` 是实际输出（不是占位符），
+  `2` 是这份文件里还有多少个字段没被点名**，不是总数、也不是 provider 数。**计数是按文件算的**：
+  **一份文件里坏了好几处，也只会出现一次「还有 N 个」**，不会每个 provider 各来一次。
 
-> 这是【码】——从调用链读出来的（`provider_has_invalid_types` → `unsafe_nesting` → `prepare_changes`）。
-> **2026-11-20 已决定保留这个只读边界**，不改门禁顺序。所以这不是「待修」，是当前的既定行为，
-> 本文按现状描述。将来若改善提示措辞，本节随之更新。
+**路径中的 `…`** 既可以是键名的一部分，也可以表示省略。
 
-**范围不止 `limit` 一处。** `provider_has_invalid_types` 对 `options` / `settings` / `headers` /
-`body` 用的是同一条规则（非对象即判无效），`env` 不合法也一样。所以凡「父对象存在但形状不对」
-的细分提示，从这个入口都到不了——读者只会看到那句文件级只读。**这是当前设计的有意取舍**
-（2026-11-20 决定保留只读边界），不是遗漏：这类文件本就不合法，先拒绝再要求修源文件更保守。
+| 示例 | 含义 |
+| --- | --- |
+| `providers.acme.models."…".limit` | 模型 ID 就是 `…`。 |
+| `providers.kkkk….models.m.limit` | 供应商键名过长，省略号加在键段末尾，后面的 `.models.m.limit` 仍完整显示。这里用 `kkkk` 简写保留下来的键名前缀。 |
+| `providers.….limit` | 格式示意。路径过长时，保留开头和能放下的连续尾部。单独一段 `…` 代表省略的中间路径段。 |
 
-若将来要改善提示，方向是**在方言分析阶段记下畸形字段的路径**，让只读错误指出具体位置，
-**不需要重排门禁顺序**。届时本节的判据表会随之更新。
+如果引号内的键名以 `…` 结尾，可以回源文件确认键名。例如，真实键名 `abc…` 会显示为 `"abc…"`。
 
-> 另记：这次收紧的测试断言曾经是**空通过**的——旧写法只要求「错误里不含 does not exist」，
-> 而文件级只读那句当然不含，所以它一直绿着却没验证任何东西。
-> 这也是本文反复强调「【码】≠【对】」的一个实例：断言真实存在的代码，不等于断言了正确的东西。
+字段类型错误和方言混用并存时，拒写提示会列出两种原因。下方将同一条提示分行展示。
 
-> **另外一个坑：这些提示目前也没有测试覆盖，但原因不同。** 本轮新增的回归测试只断言了
-> 用户真正拿到的那句文件级只读，**没有断言 `must be an object`**——因为它不可达。
-> 而早期有一条测试断言「消息不含 `does not exist`」，那句文件级只读当然不含，于是它
-> **一直空通过**，看着像在测「两种错误不同」，实际什么都没测。收紧断言后才暴露。
-> 所以：**看到「有测试」不要以为「已验证」**。测试能静默早退（形状错会让文件不可写，
-> 用例可能直接 `return`），宽松断言也会通过。
+```
+The configuration field `providers.acme.models."gpt-4.1".limit` must be an object.
+It also mixes V1 and V2 provider syntax, which is not editable in this version.
+Fix the listed field(s) before editing this file.
+```
 
-**为什么同一句话会有三处来源**（技术细节，排查时可跳过）：写入分三层独立进行，三层都会在删除遇到父级不通时报这一句——
+#### 拒写提示和配置详情里的警告，文字不完全相同
+
+配置详情与拒写提示使用同一套字段检查。
+
+| 位置 | 你看到什么 |
+| --- | --- |
+| 配置详情（警告列表） | 字段提示会逐条列出，省略的字段另有计数。混用时还会列出 `Nested V1/V2 provider syntax is unsafe to edit; this file is read-only.` |
+| 拒写提示（编辑被拒绝时） | 字段提示、省略计数（如有）、混用原因（如有）合成一条错误，末尾加上 `Fix the listed field(s) before editing this file.` |
+
+#### 哪些「字段类型错」的提示看得到，哪些仍然看不到
+
+**判据没变：看这条消息校验的是「你这次要写入的值」，还是「源文件里已经存在的内容」。**
+
+| 它校验的是 | 现在能否看到 | 例 |
+| --- | --- | --- |
+| **你这次提交的值** | **看得到** | `The limit field must be an object.`（新建模型时） |
+| **源文件里已有的 `limit`** | 文件级拒写会给出路径和期望类型 | 源码中的 ``The `limit` field must be an object.`` 由此前的拒写检查挡住。 |
+
+> **「带不带反引号」不是判据。** `Model capabilities must be an object.` 没有反引号却**可达**，
+> 因为它在新建路径上校验的是你提交的值。按措辞配对会漏——本文就漏过一条，是照这个规则补齐的。
+
+> `provider` / `providers` 里的**字段类型错**会让整份文件只读（这就是上面那条字段级提示的来源）。
+> **但 root 的 `model` 不在其列**——所以默认模型的类型问题文件仍可写，那两条消息是**可达**的。
+
+**具体反例（可达）**：默认模型（root `model`）写成对象时，改它会报
+`The existing default model uses an object selector and cannot be replaced in this version.`，
+删它会报 `The existing default model is not a string and cannot be removed in this version.`。
+**这两条描述的是「源文件里已有值类型不对」，但用户看得到**——root `model` 不在只读判定的范围内，
+文件仍可写，`validate_default_model_edit` 真的会被执行到。
+
+> 所以别记成「凡是讲源文件类型错的消息都不可达」——**那是一条会骗人的全称结论**。
+> 判据是「这个字段会不会让整份文件只读」，一个个核，别推广。
+
+#### 为什么同一句话会有三处来源（技术细节，排查时可跳过）
+
+写入分三层独立进行，三层都会在删除遇到父级不通时报这一句——
 
 | 层 | 位置 | 报错条件 |
 | --- | --- | --- |
@@ -352,40 +352,6 @@ prepare_changes：直接返回，不进入任何字段校验
 `The generated change did not match the requested semantic edits; no file was modified.`）。
 这是本代码最可靠的设计之一，代价就是同一句错误可能来自三层。
 三处都只由 `EditOp::Remove` 进入，所以这句话对用户只有一种含义：**要删的东西的父级不在**。
-
-#### 一条能覆盖全类的规则：这句话校验的是「谁」
-
-上面那些「不可达」的判断不用一条条背。**看这条 `ok_or_else` 校验的是哪个值**：
-
-| 它校验的是 | 用户能不能看到 | 例 |
-| --- | --- | --- |
-| **你这次要写入的值**（`edit.value` / 本次提交） | **看得到** | `The limit field must be an object.` |
-| **源文件里已经存在的内容** | **只有当该字段在下方覆盖范围内时才看不到** | ``The `limit` field must be an object.`` |
-
-原因是 `prepare_changes` 的顺序：**先整份文件判只读，再逐条校验编辑**。校验「已有内容」的
-消息排在门禁之后，所以永远轮不到它。判只读靠的是 `provider_has_invalid_types`，它覆盖的字段是：
-
-```
-provider 级：options / settings / headers / body / env / name / npm / api / package
-model  级：limit / reasoning / capabilities / variants / name / id / modelID
-```
-
-**所以「带不带反引号」不是判据，只是巧合。** `Model capabilities must be an object.` 没有反引号
-却**可达**，因为它在新建路径上校验的是你提交的值。按措辞配对会漏——本文就漏过一条，
-是照这个规则补齐的。
-
-
-> `provider_has_invalid_types` **不看 root 的 `model`**，也不看上面没列出的字段。
-> **覆盖范围之外的字段类型错了，文件不会变只读，那些消息是可达的。**
-
-**具体反例（可达）**：默认模型（root `model`）写成对象时，改它会报
-`The existing default model uses an object selector and cannot be replaced in this version.`，
-删它会报 `The existing default model is not a string and cannot be removed in this version.`。
-**这两条描述的是「源文件里已有值类型不对」，但用户看得到**——root `model` 不在覆盖范围内，
-文件仍可写，`validate_default_model_edit` 真的会被执行到。
-
-> 所以别记成「凡是讲源文件类型错的消息都不可达」——**那是一条会骗人的全称结论**。
-> 判据是「这个字段在不在 `provider_has_invalid_types` 的覆盖范围内」，一个个核，别推广。
 #### 源文件坏在哪，决定你看到哪一句
 
 「文件被判只读」不是只有一句话。坏的位置不同，**用户在 `prepare_changes` 撞到的门也不同**：
@@ -393,17 +359,23 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 | 源文件的问题 | 用户实际看到的 | 不是哪一句 |
 | --- | --- | --- |
 | 顶层 `provider`/`providers` 不是对象（`dialect` 为 `Invalid`） | `This configuration cannot be parsed safely as JSONC.` | **不是** `unsafe mixture`，也**不是** `A provider map has an invalid shape and is read-only.`（那条在 `warnings` 里） |
-| 已有 provider/model 的某字段类型错 | `This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.` | — |
 | 有重复 key | `Duplicate configuration keys make this file unsafe to edit.` | — |
+| 已有 provider/model 的某字段类型错 | ``The configuration field `{}` must be {expected}.``（会指出路径和期望类型） | — |
+| 只有真正的方言混用 | `This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.` | — |
+
+> **顺序是有讲究的，表就是按顺序排的。** `prepare_changes` 里的判断依次是：
+> 解析失败或 `dialect` 为 `Invalid` →
+> 重复 key → **字段类型错误** → 方言混用。编辑请求返回最先命中的拒写原因。
+> 如果文件同时有字段类型错误和方言混用，字段类型错误这一项会在同一次拒写中列出两种原因。
 
 > **`warnings` 里的文字不是返回给用户的错误。** `A provider map has an invalid shape and is read-only.`
-> 只在只读横幅里出现，编辑请求本身返回的是上表第一行那句。**「这句话存在」不等于「用户会看到它」。**
+> 只在只读横幅里出现；编辑请求本身返回的是上表第一行那句。**「这句话存在」不等于「用户会看到它」。**
 
 #### 其它提示
 
-> 下面标注「**从编辑入口不可达**」的两条，是内部校验层的消息：代码里存在，但一份坏文件
-> 会在走到它们之前就被整只判为只读。**用户不会看到**，列在这里是为了让读到源码的人
-> 不在文档里找不到它而怀疑文档有遗漏。
+> 下面标注「**从编辑入口不可达**」的几条，是内部校验层的消息：代码里存在，但一份坏文件
+> 会在走到它们之前就被**字段级门禁**拦下——而门禁会给出一条指出具体路径的提示。**用户看不到这些原句**，
+> 列在这里是为了让读到源码的人不在文档里找不到它而怀疑文档有遗漏。
 >
 > **下面这张表里有两组，而且有两个原因同时成立，别只记住一个。** 第 1–2 行是「编辑已有字段」
 > 路径的，当前不可达；第 3–5 行是「**新建**」路径的，**可达**——新建时源文件里没有那个字段，
@@ -411,7 +383,7 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 > 所以按字段名合并会在核对时漏掉一半。
 
 > **判据是「这条消息校验的是什么」，不是反引号。** 校验本次提交的值（`edit.value`）→ 可达；
-> 校验源文件里已有的内容 → 只有当该字段在 `provider_has_invalid_types` 覆盖范围内时才被门禁抢先。
+> 校验源文件里已有的内容 → 会被字段级门禁抢先，用户拿到的是指出具体路径的那一条。
 > **反引号只是排版习惯，不是判据。** 本文件里带反引号的提示既可能可达也可能不可达，
 > 两半都有反例。**不要按反引号归类，也不要背一张「带反引号的提示清单」——清单必然不全，
 > 判据才可维护。** 反例：`validate_edit_batch` 里那条「一次 `set` 编辑必须带值」同样带反引号，
@@ -428,20 +400,20 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 
 | 提示原文 | 含义与处置 |
 | --- | --- |
-| `The `limit` field must be an object.` | **当前用户看不到这句。** 源文件里 `limit` 不是对象时，整份文件先被判只读，你会看到「unsafe mixture … read-only」。见上「关于 must be an object 这句」。 |
-| `The `capabilities` field must be an object.` | **当前用户看不到这句。** 同上，`capabilities` 不是对象会让整份文件只读。 |
+| ``The `limit` field must be an object.`` | 源文件里的 `limit` 类型不符时，编辑请求先返回字段诊断 ``The configuration field `{}` must be {expected}.``，指出路径和期望类型。 |
+| ``The `capabilities` field must be an object.`` | 源文件里的 `capabilities` 类型不符时，编辑请求先返回字段诊断。 |
 | `The limit field must be an object.` | **新建模型时**，提交的 `limit` 不是对象。改本次输入。 |
 | `Model capabilities must be an object.` | **新建模型时**，提交的 `capabilities` 不是对象。改本次输入。 |
 | `The provider options/settings field must be an object.` | **新建供应商时**，提交的 `options` / `settings` 不是对象。改本次输入。 |
 | `The edit target does not exist.` | `remove` 的目标本身不存在。刷新后重试，并检查路径是否写错。 |
 | `The provider does not exist; create it before editing nested fields.` | 先建供应商条目，再改它下面的字段。 |
 | `The model does not exist; create it before editing nested fields.` | 先建模型条目，再改它下面的字段。 |
-| `The existing provider has an invalid shape.` | 供应商条目存在但不是对象。**这句从编辑入口不可达**——整份文件会先被判只读，你看到的是 `unsafe mixture … read-only`。处置仍是改源文件。 |
-| `The existing model has an invalid shape.` | 模型条目存在但不是对象。**这句从编辑入口不可达**——同上，会先撞到只读门禁。处置仍是改源文件。 |
-| `The provider map has an invalid shape.` | **这句从编辑入口不可达。** 顶层 `provider`/`providers` 不是对象时 `dialect` 被判为 `Invalid`，`prepare_changes` 在更前面就返回 **`This configuration cannot be parsed safely as JSONC.`**（`config.rs:237-238`）。**不是** `unsafe mixture` 那句——`unsafe_nesting` 的检查在它之后。处置：修顶层结构。 |
+| `The existing provider has an invalid shape.` | 供应商条目存在但不是对象。**这句从编辑入口不可达**——它会先触发字段级门禁，你看到的是指出路径的那句。处置仍是改源文件。 |
+| `The existing model has an invalid shape.` | 模型条目存在但不是对象。**这句从编辑入口不可达**——同上，会先撞到字段级门禁。处置仍是改源文件。 |
+| `The provider map has an invalid shape.` | **这句从编辑入口不可达。** 顶层 `provider`/`providers` 不是对象时 `dialect` 被判为 `Invalid`，`prepare_changes` 在更前面就返回 **`This configuration cannot be parsed safely as JSONC.`**（`prepare_changes` 的解析门禁）。**不是** `unsafe mixture` 那句——`unsafe_nesting` 的检查在它之后。处置：修顶层结构。 |
 | `The configuration root must be an object.` | 配置文件最外层不是对象（比如是个数组或裸值）。源文件需人工修正。 |
 | `The target object could not be located safely.` / `The target object range is not safe to edit.` | 要改的那段在文件里的位置无法安全定位（格式太特殊）。调整文件格式或手工编辑。 |
-| `The provider `<key>` field has an invalid shape.` | 该字段存在但类型不对。**这句从编辑入口不可达**：该字段类型错会让整份文件先被判只读（见上）。处置：改源文件。 |
+| ``The provider `<key>` field has an invalid shape.`` | 该字段存在但类型不对。**这句从编辑入口不可达**：该字段类型错会先触字段级门禁（见上）。处置：改源文件。 |
 | `The model identifier is empty or too long.` | 模型键名为空或过长（上限 256 字符）。 |
 | `The {label} identifier is empty or too long.` | 同上，`{label}` 会是 `provider` 或 `model`。 |
 | `The {label} identifier contains control characters.` | ID 里有控制字符。 |
