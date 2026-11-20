@@ -60,9 +60,40 @@ function Test-LiteralPresent {
     param([string]$Source, [string]$Literal)
     return $Source.IndexOf($Literal, [System.StringComparison]::Ordinal) -ge 0
 }
+function Get-RequiredErrorLiterals {
+    param([string]$DocName, [string]$Text, [string[]]$Ids)
+
+    foreach ($id in $Ids) {
+        $markerPattern = '<!--[ \t]*verify:' + [regex]::Escape($id) + '[ \t]*-->'
+        $markers = [regex]::Matches($Text, $markerPattern)
+        if ($markers.Count -eq 0) { throw "MISSING MARKER in ${DocName}: $id" }
+        if ($markers.Count -gt 1) { throw "DUPLICATE MARKER in ${DocName}: $id" }
+
+        $markerIndex = $markers[0].Index
+        $lineStart = $Text.LastIndexOf("`n", $markerIndex) + 1
+        $lineEnd = $Text.IndexOf("`n", $markerIndex)
+        if ($lineEnd -lt 0) { $lineEnd = $Text.Length }
+        $row = $Text.Substring($lineStart, $lineEnd - $lineStart).Trim()
+        if (-not ($row.StartsWith('|') -and $row.EndsWith('|'))) {
+            throw "INVALID MARKER in ${DocName}: $id must be in a table row."
+        }
+
+        # The marked cell must contain one code span immediately followed by its marker.
+        $cells = $row -split '(?<!\\)\|'
+        $markedCell = $cells | Where-Object { $_ -cmatch $markerPattern }
+        $cellPattern = '^[ \t]*(?<fence>`+)(?<literal>[^`]+)\k<fence>[ \t]*' + $markerPattern + '[ \t]*$'
+        $match = [regex]::Match([string]$markedCell, $cellPattern)
+        if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups['literal'].Value)) {
+            throw "INVALID MARKER in ${DocName}: $id must follow a single code span in the same cell."
+        }
+
+        [pscustomobject]@{ Doc = $DocName; Literal = $match.Groups['literal'].Value.Trim(); Id = $id }
+    }
+}
+
 $script:SkippedLiterals = New-Object System.Collections.ArrayList
 function Get-QuotedErrorLiterals {
-    param($Docs)
+    param($Docs, $RequiredLiterals)
     # Only error-MESSAGE-shaped literals are collected: a capitalised sentence ending
     # in a period. That deliberately excludes paths, env vars, identifiers and code
     # snippets, which other docs legitimately quote without being error strings.
@@ -90,6 +121,7 @@ function Get-QuotedErrorLiterals {
     $pattern = '`([A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?\.)`'
     foreach ($doc in $Docs) {
         $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
+        $requiredInDoc = @($RequiredLiterals | Where-Object Doc -CEQ $doc.Name | ForEach-Object Literal)
         foreach ($m in [regex]::Matches($text, $pattern)) {
             # Group 1 already excludes the surrounding backticks.
             # A message that quotes a field name, like "A `remove` edit ...", keeps
@@ -97,8 +129,9 @@ function Get-QuotedErrorLiterals {
             $literal = $m.Groups[1].Value.Trim()
             # An error message has whitespace; identifiers and paths do not.
             if ($literal -notmatch '\s') { continue }
-            # Skip placeholders: the source has format!() templates, so {..} and <..>
-            # never match verbatim. Those are checked by eye in the doc instead.
+            if ($requiredInDoc -ccontains $literal) { continue }
+            # Unmarked placeholders may use names that differ from the Rust template.
+            # Report those excerpts as unchecked.
             if ($literal -match '<|\{|\}') { [void]$script:SkippedLiterals.Add($literal); continue }
             [pscustomobject]@{ Doc = $doc.Name; Literal = $literal }
         }
@@ -142,21 +175,36 @@ Write-Output "Self-test OK: matching is case-sensitive and still finds exact tex
 # --- Real check ------------------------------------------------------------
 $source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
 $docs = Get-ChildItem $docsDir -Filter *.md -File
-$literals = @(Get-QuotedErrorLiterals -Docs $docs)
+$requiredDoc = 'config-editing.md'
+# Keep the required IDs independent of the document so deletion fails the check.
+$requiredIds = @(
+    'label-empty-or-too-long',
+    'label-control-chars',
+    'label-reserved-char',
+    'max-models-truncated'
+)
+$requiredText = [System.IO.File]::ReadAllText((Join-Path $docsDir $requiredDoc), [System.Text.Encoding]::UTF8)
+$requiredLiterals = @(Get-RequiredErrorLiterals -DocName $requiredDoc -Text $requiredText -Ids $requiredIds)
+$literals = $requiredLiterals + @(Get-QuotedErrorLiterals -Docs $docs -RequiredLiterals $requiredLiterals)
 $missing = @()
 
 foreach ($item in $literals) {
-    if (-not (Test-LiteralPresent -Source $source -Literal $item.Literal)) {
+    # The required excerpts are complete Rust string literals.
+    $sourceText = if ($item.Id) { '"' + $item.Literal + '"' } else { $item.Literal }
+    if (-not (Test-LiteralPresent -Source $source -Literal $sourceText)) {
         $missing += $item
     }
 }
 
-Write-Output "Checked $($literals.Count) quoted literals across $($docs.Count) doc file(s)."
+Write-Output "Checked $($literals.Count) quoted literals across $($docs.Count) doc file(s), including $($requiredLiterals.Count) required excerpts."
 
 if ($missing.Count -gt 0) {
     Write-Output ""
     Write-Output "UNVERIFIED - these are quoted in docs but absent from source:"
-    $missing | ForEach-Object { Write-Output ("  [{0}] {1}" -f $_.Doc, $_.Literal) }
+    foreach ($item in $missing) {
+        $location = if ($item.Id) { "$($item.Doc):$($item.Id)" } else { $item.Doc }
+        Write-Output ("  [{0}] {1}" -f $location, $item.Literal)
+    }
     Write-Output ""
     Write-Output "Either the doc quotes it inaccurately, or the source string changed and the doc must follow."
     exit 1
@@ -164,10 +212,8 @@ if ($missing.Count -gt 0) {
 
 Write-Output "OK - every checked literal exists verbatim in the Rust source."
 
-# Literals containing placeholders ({id}, {status}, ...) are skipped on purpose: the source has
-# format!() templates and the doc writes the readable form with braces, so the two can never be
-# equal. They are NOT covered by this script. Say so out loud: a green run must not imply full
-# coverage, because the skipped ones are exactly where a rewritten message goes unnoticed.
+# Unmarked literals containing placeholders are skipped. The required excerpts above
+# are compared verbatim, including their placeholder names.
 $skipped = @($script:SkippedLiterals)
 if ($skipped.Count -gt 0) {
     Write-Output ""
