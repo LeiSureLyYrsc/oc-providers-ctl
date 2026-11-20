@@ -242,18 +242,6 @@ fn render_key_chars(key: &str, allowance: usize) -> (String, usize) {
     (out, spent)
 }
 
-fn push_capped(out: &mut String, segment: &str) {
-    let mut remaining = MAX_DIAGNOSTIC_KEY;
-    for c in segment.chars() {
-        if remaining == 0 {
-            out.push('…');
-            return;
-        }
-        out.push(c);
-        remaining -= 1;
-    }
-}
-
 /// At most `MAX_REPORTED_FIELD_ERRORS` field sentences, plus a count of the rest.
 fn field_error_sentences(errors: &[FieldError]) -> Vec<String> {
     let mut out: Vec<String> = errors
