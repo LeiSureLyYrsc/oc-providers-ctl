@@ -413,9 +413,18 @@ fn protocol_for_package(package: &str) -> Option<OpenAiProtocol> {
         "@ai-sdk/xai" | "aisdk:@ai-sdk/xai" | "@opencode/ai/providers/xai" => {
             Some(OpenAiProtocol::XAi)
         }
-        // Anthropic's native Messages API. The package list is verified against
-        // https://opencode.ai/docs/providers/ ("Native package options").
-        "@opencode/ai/providers/anthropic" => Some(OpenAiProtocol::Anthropic),
+        // Anthropic's native Messages API. `@ai-sdk/anthropic` is the native
+        // Messages protocol with default base https://api.anthropic.com/v1
+        // (checked in the npm registry, 2026-11-20). Both spellings are listed
+        // for every family above, so an Anthropic entry must not be the one
+        // that only works un-prefixed.
+        //
+        // There is deliberately no `@ai-sdk/anthropic-compatible`: the package
+        // does not exist in the npm registry (404 on 2026-11-20), so listing it
+        // would advertise support for something nobody can install.
+        "@ai-sdk/anthropic" | "aisdk:@ai-sdk/anthropic" | "@opencode/ai/providers/anthropic" => {
+            Some(OpenAiProtocol::Anthropic)
+        }
         "@opencode/ai/providers/anthropic-compatible" => Some(OpenAiProtocol::AnthropicCompatible),
         _ => None,
     }
