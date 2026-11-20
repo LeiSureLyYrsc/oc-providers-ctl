@@ -157,11 +157,20 @@ impl MockServer {
                         };
                         let response = responses[next_response].clone();
                         next_response += 1;
-                        // Record the completed request regardless of how much of
-                        // the response the client was willing to read; the
-                        // remaining planned responses stay queued in order.
-                        write_response(&mut stream, &response);
+                        // Record the request *before* writing the response.
+                        // The other order leaves a window where the client has
+                        // already received the full response and can observe
+                        // `request_count()` while it is still one short -- a
+                        // race that shows up on a loaded CI runner, not on an
+                        // idle machine. Recording first makes the count
+                        // monotonic with respect to the client's progress: by
+                        // the time a response arrives, the request is counted.
+                        //
+                        // The intent stated below still holds: a request is
+                        // recorded regardless of how much of the response the
+                        // client was willing to read.
                         thread_requests.lock().unwrap().push(request);
+                        write_response(&mut stream, &response);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
