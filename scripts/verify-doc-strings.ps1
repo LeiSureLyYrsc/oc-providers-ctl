@@ -24,11 +24,15 @@
 #             boundary test, because a placeholder is what made their spelling ambiguous.
 #             State it here because a protection that covers only some excerpts, with
 #             no stated range, reads as covering all of them.
-#   DOES NOT: follow `concat!`. It requires the quoted sentence to START a source
-#             literal. A doc may still quote only a message's first sentence -- that is a
-#             substring beginning right after the opening quote, and it passes. A prefix
-#             spliced in as its own literal passes too, while the final message differs;
-#             the same prefix written inside that one literal fails.
+#   DOES NOT: follow how the message is assembled. It requires the quoted sentence to
+#             START a source literal. A doc may still quote only a message's first
+#             sentence -- that is a substring beginning right after the opening quote, and
+#             it passes. Any prefix kept OUT of that literal also passes: `concat!`, a
+#             `[..].concat()` array, `String + &str`, `format!`. All four measured; the
+#             verified sentence still starts right after its own quote, so the check
+#             cannot tell the final message changed. A prefix written INSIDE that one
+#             literal breaks the start and fails. So `concat!` is not special -- it is
+#             one spelling of a splice, and the check sees none of them.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
