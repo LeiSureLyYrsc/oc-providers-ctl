@@ -202,6 +202,20 @@ async fn catalog_refresh_caches_public_metadata_and_searches_locally() {
     assert_eq!(filtered[0].provider_id, "proxy");
 
     let no_remote_query = catalog.search("gpt-4o", Some("openai"));
+    // Lower bound: the server records a request only after it has written the
+    // response, so a caller that just received one may still see a count that is
+    // one short (`network_support/mod.rs`, `wait_for_requests`). Wait for the
+    // recorded count instead of reading it immediately.
+    assert!(
+        server.wait_for_requests(1, Duration::from_secs(2)),
+        "the catalog refresh request was never recorded, saw {}",
+        server.request_count()
+    );
+    // Upper bound: this can only say "no extra request was recorded". The mock
+    // server stops accepting once its planned responses are served, so a request
+    // that search() should not have made would never reach the recorded list and
+    // this assertion could not see it. Letting the fixture accept an extra
+    // request is what would make the extra one observable.
     assert_eq!(
         server.request_count(),
         1,
