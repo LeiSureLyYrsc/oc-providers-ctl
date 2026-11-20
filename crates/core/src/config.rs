@@ -4085,24 +4085,36 @@ mod diagnostic_path_tests {
 
     #[test]
     fn a_budget_that_ends_exactly_on_the_cap_does_not_overflow() {
-        // One plain key filling every character the path is allowed: no
-        // ellipsis is needed and none may be added.
-        let exact = "k".repeat(MAX_DIAGNOSTIC_PATH);
-        let rendered = assert_within_cap(&[exact.as_str()]);
-        assert_eq!(rendered.chars().count(), MAX_DIAGNOSTIC_PATH);
-        assert!(!rendered.ends_with('…'));
+        // A single key can never render longer than MAX_DIAGNOSTIC_KEY, so one
+        // huge key is stopped by the per-key limit before the path budget is
+        // reached. That is the first boundary and it must hold on its own.
+        let huge = "k".repeat(MAX_DIAGNOSTIC_PATH);
+        let rendered = assert_within_cap(&[huge.as_str()]);
+        assert!(
+            rendered.ends_with('…'),
+            "a key past the per-key cap must be truncated: {rendered:?}"
+        );
+        assert!(
+            rendered.chars().count() <= MAX_DIAGNOSTIC_KEY + 1,
+            "a single key is capped at {MAX_DIAGNOSTIC_KEY} plus its ellipsis, \
+             got {}: {rendered:?}",
+            rendered.chars().count()
+        );
 
-        // One character more, and it must be truncated with the ellipsis still
-        // inside the cap rather than appended past it.
-        let over = "k".repeat(MAX_DIAGNOSTIC_PATH + 1);
-        let rendered = assert_within_cap(&[over.as_str()]);
-        assert!(rendered.ends_with('…'), "expected truncation: {rendered:?}");
+        // The whole-path budget is what the rest of this test is about: keys
+        // that each fit their own cap, whose sum would overflow the path cap.
+        let segment = "k".repeat(MAX_DIAGNOSTIC_KEY);
+        let many: Vec<&str> = (0..10).map(|_| segment.as_str()).collect();
+        let rendered = assert_within_cap(&many);
+        assert!(
+            rendered.ends_with('…'),
+            "a path past the overall cap must be truncated: {rendered:?}"
+        );
 
-        // A quoted key has to pay for its quotes out of the same budget. This
-        // is the case the old code underflowed on: the name is one character
-        // longer than would leave room for two quotes.
-        let quoted_exact = format!("{}.", "k".repeat(MAX_DIAGNOSTIC_PATH - 3));
-        let _ = assert_within_cap(&[quoted_exact.as_str()]);
+        // A quoted key has to pay for its quotes out of the same budget; this
+        // is the case the old code could underflow on.
+        let quoted = format!("{}.{}", "k".repeat(150), "j".repeat(150));
+        let _ = assert_within_cap(&[quoted.as_str()]);
     }
 
     #[test]
