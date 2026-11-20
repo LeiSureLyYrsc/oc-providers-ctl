@@ -157,20 +157,13 @@ impl MockServer {
                         };
                         let response = responses[next_response].clone();
                         next_response += 1;
-                        // Record the request *before* writing the response.
-                        // The other order leaves a window where the client has
-                        // already received the full response and can observe
-                        // `request_count()` while it is still one short -- a
-                        // race that shows up on a loaded CI runner, not on an
-                        // idle machine. Recording first makes the count
-                        // monotonic with respect to the client's progress: by
-                        // the time a response arrives, the request is counted.
-                        //
-                        // The intent stated below still holds: a request is
-                        // recorded regardless of how much of the response the
-                        // client was willing to read.
-                        thread_requests.lock().unwrap().push(request);
+                        // Record the completed request regardless of how much of
+                        // the response the client was willing to read; the
+                        // remaining planned responses stay queued in order. The
+                        // write-then-record order is deliberate -- see the note
+                        // on `read_request`.
                         write_response(&mut stream, &response);
+                        thread_requests.lock().unwrap().push(request);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
@@ -215,6 +208,18 @@ impl MockServer {
         self.requests.lock().unwrap().len()
     }
 
+    /// Wait until at least `count` requests have been recorded, or the timeout
+    /// expires. Returns whether the count was reached.
+    ///
+    /// The server records a request *after* it has written the response, so a
+    /// caller that has just received a response may observe a count that is
+    /// still one short. Callers must therefore wait here rather than assert on
+    /// `request_count()` immediately.
+    ///
+    /// That ordering is deliberate: it keeps the count from running ahead of
+    /// delivery, so `wait_for_requests(n)` is a reliable signal that n
+    /// responses have actually been written. Reversing the two would make this
+    /// function return while a response was still going out.
     pub fn wait_for_requests(&self, count: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
