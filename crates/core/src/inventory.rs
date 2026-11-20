@@ -36,6 +36,7 @@ const MAX_MODELS: usize = 10_000;
 const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 const OPENROUTER_DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
 const XAI_DEFAULT_BASE: &str = "https://api.x.ai/v1";
+const ANTHROPIC_DEFAULT_BASE: &str = "https://api.anthropic.com/v1";
 
 /// Model identifiers reported by a provider's public model-list endpoint.
 ///
@@ -63,11 +64,12 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
     let config = read_configuration(path)?;
     let provider_entry = select_provider(&config, provider_id)?;
     let settings = extract_provider_settings(provider_entry, provider_id)?;
-    let endpoint = resolve_models_endpoint(&settings)?;
+    let (endpoint, protocol) = resolve_models_endpoint(&settings)?;
 
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let api_key = resolve_api_key(&settings, config_dir)?;
-    let headers = prepare_headers(&settings.headers, api_key.as_deref(), config_dir)?;
+    let configured_headers = with_protocol_default_headers(protocol, settings.headers.clone());
+    let headers = prepare_headers(&configured_headers, api_key.as_deref(), config_dir)?;
 
     // Plain HTTP is allowed for any host, but a successful fetch reports the
     // lack of transport encryption. Compute it before the URL is consumed.
@@ -347,6 +349,30 @@ enum OpenAiProtocol {
     OpenAiCompatible,
     OpenRouter,
     XAi,
+    /// Anthropic's native Messages API (`/v1/models`).
+    ///
+    /// The response container (`data[]`) and the ID key (`id`) are identical to
+    /// the OpenAI-shaped listings, so the parser needs no Anthropic-specific
+    /// branch. What differs is the endpoint, the required version header, and
+    /// the pagination contract (`has_more` + `last_id` -> `after_id`).
+    Anthropic,
+    /// A third-party service that speaks the Anthropic protocol.
+    ///
+    /// Deliberately has **no default base URL**: this package points at a
+    /// gateway the user configured, so falling back to the official Anthropic
+    /// domain would send a gateway credential to `api.anthropic.com`.
+    AnthropicCompatible,
+}
+
+impl OpenAiProtocol {
+    /// `false` only for the two Anthropic variants, which need the
+    /// `anthropic-version` request header.
+    fn is_anthropic(self) -> bool {
+        matches!(
+            self,
+            OpenAiProtocol::Anthropic | OpenAiProtocol::AnthropicCompatible
+        )
+    }
 }
 
 /// Exact allow-list of official package paths whose model-list protocol is
@@ -372,11 +398,17 @@ fn protocol_for_package(package: &str) -> Option<OpenAiProtocol> {
         "@ai-sdk/xai" | "aisdk:@ai-sdk/xai" | "@opencode/ai/providers/xai" => {
             Some(OpenAiProtocol::XAi)
         }
+        // Anthropic's native Messages API. The package list is verified against
+        // https://opencode.ai/docs/providers/ ("Native package options").
+        "@opencode/ai/providers/anthropic" => Some(OpenAiProtocol::Anthropic),
+        "@opencode/ai/providers/anthropic-compatible" => {
+            Some(OpenAiProtocol::AnthropicCompatible)
+        }
         _ => None,
     }
 }
 
-fn resolve_models_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
+fn resolve_models_endpoint(settings: &ProviderSettings) -> Result<(Url, OpenAiProtocol), String> {
     let configured_base = match settings.base_url.as_deref() {
         Some(base) => Some(parse_provider_url(base)?),
         None => None,
@@ -385,7 +417,7 @@ fn resolve_models_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
     let protocol = if let Some(package) = settings.package.as_deref() {
         protocol_for_package(package).ok_or_else(|| {
             format!(
-                "Provider '{}' uses the unsupported package '{}'. Only official OpenAI-compatible packages are supported; no model-list request was made.",
+                "Provider '{}' uses the unsupported package '{}'. Only official OpenAI and Anthropic provider packages are supported; no model-list request was made.",
                 safe_label(&settings.provider_id),
                 safe_package(package),
             )
@@ -421,9 +453,60 @@ fn resolve_models_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
         OpenAiProtocol::XAi => {
             configured_base.unwrap_or(parse_provider_url(XAI_DEFAULT_BASE)?)
         }
+        OpenAiProtocol::Anthropic => {
+            configured_base.unwrap_or(parse_provider_url(ANTHROPIC_DEFAULT_BASE)?)
+        }
+        OpenAiProtocol::AnthropicCompatible => configured_base.ok_or_else(|| {
+            format!(
+                "Provider '{}' uses an Anthropic-compatible package but does not define a base URL. Add `settings.baseURL` or `options.baseURL`; no model-list request was made.",
+                safe_label(&settings.provider_id)
+            )
+        })?,
     };
 
-    Ok(models_endpoint(base))
+    let endpoint = models_endpoint(base);
+
+    // An explicit `models` endpoint already in the base URL is honoured above;
+    // everything else takes the `/models` suffix.
+    Ok((endpoint, protocol))
+}
+
+/// The Anthropic API requires this header, but the vendor's own documentation
+/// disagrees on whether it is mandatory (`/api/overview` says "Yes", while the
+/// `/api/models-list` reference marks it "optional"). The cost of the two
+/// failure modes is asymmetric: sending it when optional costs nothing, while
+/// omitting it when required breaks every Anthropic request. So it is always
+/// supplied unless the user configured their own value.
+///
+/// Note: a missing version does **not** produce a version-specific error —
+/// Anthropic evaluates authentication first, so an anonymous probe with no
+/// version header still returns an auth 401. That is why this default exists
+/// rather than relying on a diagnosable failure.
+const ANTHROPIC_DEFAULT_VERSION: &str = "2026-10-21";
+const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
+
+/// Add defaults that depend on the resolved protocol, without changing the
+/// signature of [`prepare_headers`] (which several tests exercise directly).
+///
+/// `configured` is the user's header list; the returned list keeps every user
+/// header and only appends what is missing.
+fn with_protocol_default_headers(
+    protocol: OpenAiProtocol,
+    mut configured: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if !protocol.is_anthropic() {
+        return configured;
+    }
+    let has_version = configured.iter().any(|(name, _)| {
+        name.trim().eq_ignore_ascii_case(ANTHROPIC_VERSION_HEADER)
+    });
+    if !has_version {
+        configured.push((
+            ANTHROPIC_VERSION_HEADER.to_string(),
+            ANTHROPIC_DEFAULT_VERSION.to_string(),
+        ));
+    }
+    configured
 }
 
 fn parse_provider_url(raw: &str) -> Result<Url, String> {
@@ -531,6 +614,11 @@ fn resolve_api_key(
     Ok(None)
 }
 
+/// Header names that carry a credential in their own right. Supplying a
+/// provider key as `Authorization: Bearer` **in addition** to one of these
+/// makes the request carry two credentials at once.
+const ALTERNATIVE_CREDENTIAL_HEADERS: &[&str] = &["x-api-key", "api-key"];
+
 fn prepare_headers(
     configured: &[(String, String)],
     api_key: Option<&str>,
@@ -553,7 +641,19 @@ fn prepare_headers(
         headers.insert(header_name, header_value);
     }
 
-    if !headers.contains_key(AUTHORIZATION) {
+    // Add the provider key as `Authorization: Bearer` only when the request
+    // does not already carry a credential. Checking `AUTHORIZATION` alone was
+    // not enough: a user-supplied `x-api-key` (Anthropic) or `api-key` (Azure)
+    // would then be accompanied by a generated Bearer, and providers reject a
+    // request that carries two credentials. Anthropic answers
+    // `This request carries more than one credential...`; others may silently
+    // ignore one of them, which is worse because it looks like a bad key.
+    let already_authenticated = headers.contains_key(AUTHORIZATION)
+        || ALTERNATIVE_CREDENTIAL_HEADERS
+            .iter()
+            .any(|name| headers.contains_key(*name));
+
+    if !already_authenticated {
         if let Some(key) = api_key {
             let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
                 "The configured API key cannot be used as an HTTP header.".to_string()
