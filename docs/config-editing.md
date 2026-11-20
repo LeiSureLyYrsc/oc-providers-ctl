@@ -638,6 +638,19 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 下表是**接入时需要处理的协议差异**，不是说这些供应商现在都能拉。前提是它们已经通过上面的包检查。
 **【推】** 分页字段名与默认每页条数引自 @Anna 的官方文档核实（2026-11-20），**本项目未用真实凭据打过这些端点**。
 
+**识别范围是两边都要说的**：只说「认哪些」会高估覆盖，只说「不认哪些」会低估。`object_has_more`（`inventory.rs:808-823`）实际是：
+
+| 认得（会给你提示，结局 3） | 不认得（静默截断，结局 4） |
+| --- | --- |
+| `has_more`（顶层） | `nextPageToken`（Gemini、Fireworks） |
+| `pagination.has_more`（嵌套一层） | `next_page_token`（Cohere） |
+| `next` | `links.next`（OpenRouter） |
+| `next_page` | 其它「token」型字段名一律不认 |
+| `nextPage` | — |
+
+> 后三个（`next` / `next_page` / `nextPage`）只判「**存在且不是 null**」，不检查它的值能不能用。
+> **拿你自己拿到的响应体去对这张表**，就知道自己在结局 3 还是结局 4。
+
 | 供应商 | 分页字段 | 会被识别吗 | 默认每页 |
 | --- | --- | --- | --- |
 | Anthropic | `has_more` | ✅ 会（结局 3） | 20 |
