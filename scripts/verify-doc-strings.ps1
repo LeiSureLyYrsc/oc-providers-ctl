@@ -91,6 +91,52 @@ function Get-RequiredErrorLiterals {
     }
 }
 
+# --- Placeholder normalisation ----------------------------------------------
+# A doc excerpt may write a Rust placeholder differently from the source, and it may
+# be RIGHT to do so: the source spells it `{}` or `{provider_label}` while the doc
+# writes `{id}`, because a reader needs a name, not the format argument's variable.
+# Comparing such an excerpt verbatim reports drift that is not there.
+#
+# So both sides are normalised before comparing: `{name}`, `{}` and `<name>` all
+# collapse to one sentinel. Any placeholder matches any other placeholder.
+#
+# WHAT THIS GIVES UP, stated plainly so nobody mistakes it for exactness: after
+# normalisation the script can no longer prove the doc's placeholder NAME matches
+# the source's. It proves the surrounding words match, in order, with the same
+# NUMBER of placeholders. A doc that renamed `{status}` to `{code}` still passes.
+# That is the intended trade: the words are the text a user sees, and the argument
+# variable is not. The four required excerpts are exempt (see below) precisely
+# because they are worth pinning exactly.
+#
+# Two things are deliberately NOT placeholders:
+#   - `{}` inside a backtick-quoted field name ("The configuration field `{}` must
+#     be {expected}.") is a doc-side stand-in for a field name, and it normalises
+#     like any other placeholder; the source's own escape of it is what the
+#     sentinel covers.
+#   - a trailing ` ...` is an ABBREVIATION MARK, not a placeholder: the doc is
+#     quoting the START of a sentence and saying "it goes on". Normalising it away
+#     would silently accept any ending. Such excerpts are refused as unverifiable
+#     instead of being checked, because the words after the mark were never written
+#     down. See Get-QuotedErrorLiterals.
+$script:PlaceholderSentinel = [string][char]0x01
+function ConvertTo-NormalisedText {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    $s = [regex]::Replace($Text, '\{[A-Za-z_][A-Za-z0-9_]*\}', $script:PlaceholderSentinel)
+    $s = [regex]::Replace($s, '\{\}', $script:PlaceholderSentinel)
+    $s = [regex]::Replace($s, '<[A-Za-z_][A-Za-z0-9_]*>', $script:PlaceholderSentinel)
+    return $s
+}
+
+# Normalised comparison. The plain substring check (Test-LiteralPresent) is still
+# used for excerpts with no placeholder, so the common case stays exact and cheap.
+function Test-LiteralPresentNormalised {
+    param([string]$Source, [string]$Literal)
+    $needle = ConvertTo-NormalisedText -Text $Literal
+    $hay = ConvertTo-NormalisedText -Text $Source
+    return $hay.IndexOf($needle, [System.StringComparison]::Ordinal) -ge 0
+}
+
 $script:SkippedLiterals = New-Object System.Collections.ArrayList
 function Get-QuotedErrorLiterals {
     param($Docs, $RequiredLiterals)
@@ -123,6 +169,10 @@ function Get-QuotedErrorLiterals {
         $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
         $requiredInDoc = @($RequiredLiterals | Where-Object Doc -CEQ $doc.Name | ForEach-Object Literal)
         foreach ($m in [regex]::Matches($text, $pattern)) {
+            # 1-based line number of the excerpt, for the failure report: a message
+            # that names the file and line can be acted on, one that only quotes the
+            # text leaves the reader searching.
+            $lineNo = ($text.Substring(0, $m.Index) -split "`n").Count
             # Group 1 already excludes the surrounding backticks.
             # A message that quotes a field name, like "A `remove` edit ...", keeps
             # its inner backticks. In Markdown, wrap it in a double-backtick span.
@@ -130,10 +180,16 @@ function Get-QuotedErrorLiterals {
             # An error message has whitespace; identifiers and paths do not.
             if ($literal -notmatch '\s') { continue }
             if ($requiredInDoc -ccontains $literal) { continue }
-            # Unmarked placeholders may use names that differ from the Rust template.
-            # Report those excerpts as unchecked.
-            if ($literal -match '<|\{|\}') { [void]$script:SkippedLiterals.Add($literal); continue }
-            [pscustomobject]@{ Doc = $doc.Name; Literal = $literal }
+            # A trailing " ..." means the doc quoted only the beginning of a
+            # sentence. There is nothing after the mark to compare, so this cannot
+            # be verified -- but it IS still an excerpt someone must check by eye.
+            # Keep reporting it as unchecked rather than silently normalising the
+            # mark away and accepting whatever ending the source happens to have.
+            if ($literal -match '\s\.\.\.$') {
+                [void]$script:SkippedLiterals.Add([pscustomobject]@{ Literal = $literal; Doc = $doc.Name; Line = $lineNo })
+                continue
+            }
+            [pscustomobject]@{ Doc = $doc.Name; Literal = $literal; Line = $lineNo }
         }
     }
 }
@@ -172,6 +228,35 @@ if (-not (Test-LiteralPresent -Source $caseSource -Literal 'The limit field must
 }
 Write-Output "Self-test OK: matching is case-sensitive and still finds exact text."
 
+# (c) normalisation must match a doc placeholder against a differently-named source
+# placeholder, and must still REJECT a real word change. The second half matters more
+# than the first: normalisation that accepts anything is worse than no normalisation,
+# because it removes the check while still reporting green.
+$normSource = 'Write-Output "Provider ''{provider_label}'' was not found in this configuration file."'
+if (-not (Test-LiteralPresentNormalised -Source $normSource -Literal "Provider '{id}' was not found in this configuration file.")) {
+    Write-Output "SELF-TEST FAILED: normalisation failed to match two differently-named placeholders."
+    exit 1
+}
+if (-not (Test-LiteralPresentNormalised -Source 'Write-Output "Ignored {} provider entries."' -Literal 'Ignored {n} provider entries.')) {
+    Write-Output "SELF-TEST FAILED: normalisation failed to match a doc name against a bare `{}`."
+    exit 1
+}
+if (Test-LiteralPresentNormalised -Source $normSource -Literal "Provider '{id}' was not found in this file.") {
+    Write-Output "SELF-TEST FAILED: normalisation accepted a changed word; it must only forgive placeholders."
+    exit 1
+}
+if (Test-LiteralPresentNormalised -Source 'Write-Output "Ignored {} provider entries."' -Literal 'Ignored {n} entries.') {
+    Write-Output "SELF-TEST FAILED: normalisation accepted a dropped word."
+    exit 1
+}
+# A doc that renames a placeholder must NOT be caught: this is the cost we accepted,
+# asserted here so it is a documented property rather than a surprise later.
+if (-not (Test-LiteralPresentNormalised -Source $normSource -Literal "Provider '{anything}' was not found in this configuration file.")) {
+    Write-Output "SELF-TEST FAILED: normalisation should treat all placeholders as equal."
+    exit 1
+}
+Write-Output "Self-test OK: normalisation matches placeholders and still rejects changed words."
+
 # --- Real check ------------------------------------------------------------
 $source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
 $docs = Get-ChildItem $docsDir -Filter *.md -File
@@ -185,41 +270,72 @@ $requiredIds = @(
 )
 $requiredText = [System.IO.File]::ReadAllText((Join-Path $docsDir $requiredDoc), [System.Text.Encoding]::UTF8)
 $requiredLiterals = @(Get-RequiredErrorLiterals -DocName $requiredDoc -Text $requiredText -Ids $requiredIds)
+
+# The four required excerpts are pinned exactly and must NOT be swept into the
+# normalised set. If they were, one failure would turn two checks red and nobody
+# could tell which mechanism broke. Make the count an assertion rather than a
+# comment: adding a fifth required excerpt, or losing a marker, must fail here
+# instead of quietly changing which path checks it.
+if ($requiredLiterals.Count -ne $requiredIds.Count) {
+    Write-Output "SELF-TEST FAILED: expected $($requiredIds.Count) required excerpts, got $($requiredLiterals.Count)."
+    exit 1
+}
 $literals = $requiredLiterals + @(Get-QuotedErrorLiterals -Docs $docs -RequiredLiterals $requiredLiterals)
 $missing = @()
 
 foreach ($item in $literals) {
-    # The required excerpts are complete Rust string literals.
-    $sourceText = if ($item.Id) { '"' + $item.Literal + '"' } else { $item.Literal }
-    if (-not (Test-LiteralPresent -Source $source -Literal $sourceText)) {
+    # The required excerpts are complete Rust string literals, pinned verbatim.
+    if ($item.Id) {
+        if (-not (Test-LiteralPresent -Source $source -Literal ('"' + $item.Literal + '"'))) { $missing += $item }
+        continue
+    }
+    # Everything else may spell its placeholders differently, so compare normalised.
+    # An excerpt with no placeholder still lands on an exact substring match, because
+    # normalisation leaves it unchanged.
+    if (-not (Test-LiteralPresentNormalised -Source $source -Literal $item.Literal)) {
         $missing += $item
     }
 }
 
-Write-Output "Checked $($literals.Count) quoted literals across $($docs.Count) doc file(s), including $($requiredLiterals.Count) required excerpts."
+# Two counts, because they answer two different questions and neither replaces the
+# other. `occurrences` counts how many times an excerpt appears (the same sentence
+# quoted twice is two); `distinct` counts how many different sentences must be
+# checked. They differ whenever a doc quotes the same message more than once, which
+# happens in this corpus -- so the gap is normal, not a miscount. Reporting only one
+# number has already caused a reader to read the gap as missing rows.
+$occurrences = $literals.Count
+$distinct = @($literals | ForEach-Object { $_.Literal } | Sort-Object -Unique).Count
+Write-Output "Checked $occurrences excerpt occurrence(s) ($distinct distinct) across $($docs.Count) doc file(s), including $($requiredLiterals.Count) required excerpts."
 
 if ($missing.Count -gt 0) {
     Write-Output ""
     Write-Output "UNVERIFIED - these are quoted in docs but absent from source:"
     foreach ($item in $missing) {
-        $location = if ($item.Id) { "$($item.Doc):$($item.Id)" } else { $item.Doc }
+        $location = if ($item.Id) { "$($item.Doc):$($item.Id)" } else { "$($item.Doc):$($item.Line)" }
         Write-Output ("  [{0}] {1}" -f $location, $item.Literal)
     }
     Write-Output ""
     Write-Output "Either the doc quotes it inaccurately, or the source string changed and the doc must follow."
+    Write-Output "A placeholder mismatch is NOT the cause: {name}, {} and <name> are all treated as equal."
     exit 1
 }
 
-Write-Output "OK - every checked literal exists verbatim in the Rust source."
+Write-Output "OK - every checked literal exists in the Rust source (placeholders normalised)."
 
-# Unmarked literals containing placeholders are skipped. The required excerpts above
-# are compared verbatim, including their placeholder names.
+# Excerpts quoted only up to an abbreviation mark cannot be compared: there is
+# nothing after the mark to match. Reported, never silently accepted.
 $skipped = @($script:SkippedLiterals)
 if ($skipped.Count -gt 0) {
+    $skippedDistinct = @($skipped | ForEach-Object { $_.Literal } | Sort-Object -Unique).Count
     Write-Output ""
-    Write-Output "NOT CHECKED - $($skipped.Count) literal(s) contain placeholders and were skipped;"
+    Write-Output "NOT CHECKED - $($skipped.Count) excerpt occurrence(s) ($skippedDistinct distinct) stop at an abbreviation mark (` ...`);"
     Write-Output "these are verified by eye only, not by this script:"
-    $skipped | Sort-Object -Unique | ForEach-Object { Write-Output ("  " + $_) }
+    foreach ($literal in ($skipped | ForEach-Object { $_.Literal } | Sort-Object -Unique)) {
+        Write-Output ("  " + $literal)
+        foreach ($hit in ($skipped | Where-Object { $_.Literal -ceq $literal })) {
+            Write-Output ("        at {0}:{1}" -f $hit.Doc, $hit.Line)
+        }
+    }
 }
 Write-Output "Reminder: this proves no drift in wording only. It does NOT prove the surrounding advice,"
 Write-Output "or which code path raises a message, or how many paths do. Those need spot-checking"
