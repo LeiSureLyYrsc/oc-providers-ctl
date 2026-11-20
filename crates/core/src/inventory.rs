@@ -685,18 +685,12 @@ fn prepare_headers(
     }
 
     // Add the provider key as `Authorization: Bearer` only when the request
-    // does not already carry a credential. Checking `AUTHORIZATION` alone was
-    // not enough: a user-supplied `x-api-key` (Anthropic) or `api-key` (Azure)
-    // would then be accompanied by a generated Bearer, and providers reject a
-    // request that carries two credentials. Anthropic answers
-    // `This request carries more than one credential...`; others may silently
-    // ignore one of them, which is worse because it looks like a bad key.
-    let already_authenticated = headers.contains_key(AUTHORIZATION)
-        || ALTERNATIVE_CREDENTIAL_HEADERS
-            .iter()
-            .any(|name| headers.contains_key(*name));
-
-    if !already_authenticated {
+    // does not already carry one. Deliberately checks `AUTHORIZATION` alone:
+    // widening this to `x-api-key`/`api-key` would change what existing
+    // OpenAI-compatible gateways receive, which is not this change's business.
+    // Anthropic gets its single-credential behaviour before this call, where
+    // the key is withheld when an explicit credential header is present.
+    if !headers.contains_key(AUTHORIZATION) {
         if let Some(key) = api_key {
             let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
                 "The configured API key cannot be used as an HTTP header.".to_string()
