@@ -93,7 +93,69 @@ struct Analysis {
     warnings: Vec<String>,
     duplicate_keys: bool,
     unsafe_nesting: bool,
+    /// Whether an entry genuinely uses V1 and V2 syntax at once, as opposed to
+    /// only having a field with the wrong type. Both make the file read-only,
+    /// but only this one may be described as a mixture.
+    mixes_syntax: bool,
+    field_errors: Vec<FieldError>,
     parsed: bool,
+}
+
+/// A provider or model field whose value has the wrong shape.
+///
+/// Kept as structured data rather than a finished sentence so the read-only
+/// warning list and the edit refusal are rendered from one classification pass.
+#[derive(Debug, Clone)]
+struct FieldError {
+    /// Segments from the document root, for example
+    /// `["providers", "acme", "models", "gpt-4", "limit"]`.
+    path: Vec<String>,
+    /// What the value would have to be, for example `an object`.
+    expected: &'static str,
+}
+
+/// How many shape errors one message names before it says "and N more".
+///
+/// A pathological file can have thousands of wrong-typed fields; the message is
+/// for a person to act on, not a dump of the whole document.
+const MAX_REPORTED_FIELD_ERRORS: usize = 4;
+
+/// Whatever the classification pass found that makes a file read-only.
+///
+/// The three fields are deliberately separate: `mixes_syntax` may only be used
+/// for a genuine V1+V2 mixture, and `field_errors` only for wrong-shaped
+/// values. `unsafe_nesting` is their union, which is what the write gate reads.
+#[derive(Debug, Default)]
+struct NestingFacts {
+    unsafe_nesting: bool,
+    mixes_syntax: bool,
+    field_errors: Vec<FieldError>,
+}
+
+impl FieldError {
+    fn render(&self) -> String {
+        let expected = self.expected;
+        format!(
+            "The configuration field `{}` must be {expected}.",
+            display_edit_path(&self.path)
+        )
+    }
+}
+
+/// At most `MAX_REPORTED_FIELD_ERRORS` field sentences, plus a count of the rest.
+fn field_error_sentences(errors: &[FieldError]) -> Vec<String> {
+    let mut out: Vec<String> = errors
+        .iter()
+        .take(MAX_REPORTED_FIELD_ERRORS)
+        .map(FieldError::render)
+        .collect();
+    if errors.len() > MAX_REPORTED_FIELD_ERRORS {
+        let hidden = errors.len() - MAX_REPORTED_FIELD_ERRORS;
+        out.push(format!(
+            "{hidden} more field(s) in this file have an invalid shape."
+        ));
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +301,22 @@ pub fn prepare_changes(
     }
     if analysis.duplicate_keys {
         return Err("Duplicate configuration keys make this file unsafe to edit.".to_string());
+    }
+    if !analysis.field_errors.is_empty() {
+        // A wrong-typed field makes the file read-only for the same reason a
+        // genuine mixture does, but it is not a mixture. Say which field is
+        // wrong and what it should be; the refusal itself is unchanged, and a
+        // file that has both problems still reports the fields, because that is
+        // the actionable half.
+        let mut parts = field_error_sentences(&analysis.field_errors);
+        if analysis.mixes_syntax {
+            parts.push(
+                "It also mixes V1 and V2 provider syntax, which is not editable in this version."
+                    .to_string(),
+            );
+        }
+        parts.push("Fix the listed field(s) before editing this file.".to_string());
+        return Err(parts.join(" "));
     }
     if analysis.unsafe_nesting {
         return Err(
@@ -640,7 +718,7 @@ fn load_file(path: &Path) -> Result<LoadedFile, String> {
 
 fn analyze_file(loaded: &LoadedFile) -> Analysis {
     let mut warnings = Vec::new();
-    let mut unsafe_nesting = false;
+    let mut facts = NestingFacts::default();
     let mut duplicate_keys = false;
 
     if loaded.managed {
@@ -667,6 +745,8 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
                 warnings,
                 duplicate_keys: false,
                 unsafe_nesting: false,
+                mixes_syntax: false,
+                field_errors: Vec::new(),
                 parsed: false,
             };
         }
@@ -680,6 +760,8 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
             warnings,
             duplicate_keys: false,
             unsafe_nesting: false,
+            mixes_syntax: false,
+            field_errors: Vec::new(),
             parsed: false,
         };
     };
@@ -722,7 +804,9 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
             default_model: None,
             warnings,
             duplicate_keys,
-            unsafe_nesting,
+            unsafe_nesting: facts.unsafe_nesting,
+            mixes_syntax: facts.mixes_syntax,
+            field_errors: facts.field_errors,
             parsed: true,
         };
     }
@@ -744,18 +828,20 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
         collect_providers(
             obj,
             Dialect::V1,
+            "provider",
             &mut providers,
             &mut warnings,
-            &mut unsafe_nesting,
+            &mut facts,
         );
     }
     if let Some(obj) = providers_obj {
         collect_providers(
             obj,
             Dialect::V2,
+            "providers",
             &mut providers,
             &mut warnings,
-            &mut unsafe_nesting,
+            &mut facts,
         );
     }
 
@@ -808,7 +894,11 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
         );
     }
 
-    if unsafe_nesting {
+    // Only a genuine mixture gets the mixture warning. A file whose only problem
+    // is a wrong-typed field already has the field-level sentences above, and
+    // repeating "nested V1/V2 syntax" there would be the same misleading claim
+    // this change exists to remove.
+    if facts.mixes_syntax {
         warnings.push(
             "Nested V1/V2 provider syntax is unsafe to edit; this file is read-only.".to_string(),
         );
@@ -820,7 +910,9 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
         default_model,
         warnings,
         duplicate_keys,
-        unsafe_nesting,
+        unsafe_nesting: facts.unsafe_nesting,
+        mixes_syntax: facts.mixes_syntax,
+        field_errors: facts.field_errors,
         parsed: true,
     }
 }
@@ -851,17 +943,20 @@ fn ensure_editable(loaded: &LoadedFile) -> Result<(), String> {
 fn collect_providers(
     map: &JObject,
     map_dialect: Dialect,
+    map_key: &str,
     output: &mut Vec<ProviderEntry>,
     warnings: &mut Vec<String>,
-    unsafe_nesting: &mut bool,
+    facts: &mut NestingFacts,
 ) {
     for prop in &map.properties {
         let id = prop.name.as_str().to_string();
+        let provider_path = child_path(&[map_key.to_string()], &id);
         let Some(obj) = prop.value.as_object() else {
-            *unsafe_nesting = true;
-            warnings.push(format!(
-                "Provider '{id}' is not an object and is read-only."
-            ));
+            facts.unsafe_nesting = true;
+            facts.field_errors.push(FieldError {
+                path: provider_path,
+                expected: "an object",
+            });
             output.push(ProviderEntry {
                 id,
                 name: None,
@@ -873,15 +968,25 @@ fn collect_providers(
             continue;
         };
 
-        let (entry_dialect, entry_unsafe) = provider_dialect(obj, map_dialect);
-        if entry_unsafe {
-            *unsafe_nesting = true;
+        let ((entry_dialect, entry_mixes), entry_field_errors) =
+            provider_classify(obj, map_dialect, &provider_path);
+        if !entry_field_errors.is_empty() {
+            facts.unsafe_nesting = true;
+            for sentence in field_error_sentences(&entry_field_errors) {
+                warnings.push(sentence);
+            }
+            facts.field_errors.extend(entry_field_errors);
+        }
+        if entry_mixes {
+            facts.unsafe_nesting = true;
+            facts.mixes_syntax = true;
             warnings.push(format!(
-                "Provider '{id}' mixes V1 and V2 syntax or has invalid field types and is read-only."
+                "Provider '{id}' mixes V1 and V2 syntax and is read-only."
             ));
         }
         if entry_dialect == Dialect::Mixed {
-            *unsafe_nesting = true;
+            facts.unsafe_nesting = true;
+            facts.mixes_syntax = true;
         }
 
         let json: JsonValue = prop.value.clone().into();
@@ -955,26 +1060,19 @@ fn collect_providers(
             for model_prop in &models_obj.properties {
                 let model_id = model_prop.name.as_str().to_string();
                 let model_obj = model_prop.value.as_object();
-                if model_obj.is_none() {
-                    *unsafe_nesting = true;
-                    warnings.push(format!(
-                        "Model '{model_id}' in provider '{id}' is not an object and is read-only."
-                    ));
-                }
-                let (model_dialect, model_unsafe) = model_dialect(model_obj, entry_dialect);
-                if model_unsafe {
-                    *unsafe_nesting = true;
+                let (model_dialect, model_mixes) = model_dialect(model_obj, entry_dialect);
+                // `model_dialect` also reports `true` for a non-object entry; that
+                // case is a shape error, already covered by the classifier, and
+                // must not be described as a syntax mixture.
+                if model_obj.is_some() && model_mixes {
+                    facts.unsafe_nesting = true;
+                    facts.mixes_syntax = true;
                     warnings.push(format!(
                         "Model '{model_id}' in provider '{id}' mixes V1 and V2 syntax and is read-only."
                     ));
                 }
                 models.push(model_entry(model_id, model_obj, model_dialect));
             }
-        } else if obj.get("models").is_some() {
-            *unsafe_nesting = true;
-            warnings.push(format!(
-                "Provider '{id}' has a non-object `models` field and is read-only."
-            ));
         }
 
         output.push(ProviderEntry {
@@ -988,7 +1086,16 @@ fn collect_providers(
     }
 }
 
-fn provider_dialect(obj: &JObject, map_dialect: Dialect) -> (Dialect, bool) {
+/// Returns `((dialect, mixes_syntax), field_errors)`.
+///
+/// `mixes_syntax` is true only for a genuine V1+V2 mixture. A wrong-typed field
+/// makes the entry read-only too, but it is reported through `field_errors` so
+/// it is never described as a mixture.
+fn provider_classify(
+    obj: &JObject,
+    map_dialect: Dialect,
+    prefix: &[String],
+) -> ((Dialect, bool), Vec<FieldError>) {
     let v1_provider =
         obj.get("npm").is_some() || obj.get("api").is_some() || obj.get("options").is_some();
     let v2_provider = obj.get("package").is_some()
@@ -1033,114 +1140,188 @@ fn provider_dialect(obj: &JObject, map_dialect: Dialect) -> (Dialect, bool) {
 
     let has_v1 = v1_provider || v1_model;
     let has_v2 = v2_provider || v2_model;
+    let field_errors = provider_invalid_fields(obj, map_dialect, prefix);
     if has_v1 && has_v2 {
-        return (Dialect::Mixed, true);
+        return ((Dialect::Mixed, true), field_errors);
     }
     if has_v1 && map_dialect == Dialect::V2 {
-        return (Dialect::Mixed, true);
+        return ((Dialect::Mixed, true), field_errors);
     }
     if has_v2 && map_dialect == Dialect::V1 {
-        return (Dialect::Mixed, true);
+        return ((Dialect::Mixed, true), field_errors);
     }
 
-    let invalid_types = provider_has_invalid_types(obj, map_dialect);
-    (map_dialect, invalid_types)
+    ((map_dialect, false), field_errors)
 }
 
-fn provider_has_invalid_types(obj: &JObject, dialect: Dialect) -> bool {
+/// Collect every wrong-shaped field under one provider entry.
+///
+/// `prefix` is the path of the provider object itself, so each error can name
+/// the exact document location. This is the single classification pass that the
+/// warning list and the edit refusal both read.
+fn provider_invalid_fields(obj: &JObject, dialect: Dialect, prefix: &[String]) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+
+    // `models` is checked before the scalar fields so the most common mistake
+    // is not pushed out of the truncated message by unrelated ones.
+    if let Some(prop) = obj.get("models") {
+        match prop.value.as_object() {
+            None => errors.push(FieldError {
+                path: child_path(prefix, "models"),
+                expected: "an object",
+            }),
+            Some(models) => {
+                let models_prefix = child_path(prefix, "models");
+                for model_prop in &models.properties {
+                    let model_id = model_prop.name.as_str().to_string();
+                    let model_prefix = child_path(&models_prefix, &model_id);
+                    match model_prop.value.as_object() {
+                        None => errors.push(FieldError {
+                            path: model_prefix,
+                            expected: "an object",
+                        }),
+                        Some(model) => {
+                            collect_model_invalid_fields(model, dialect, &model_prefix, &mut errors)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let string_fields = ["name", "npm", "api", "package"];
     for f in string_fields {
         if obj
             .get(f)
             .is_some_and(|p| p.value.as_string_lit().is_none())
         {
-            return true;
+            errors.push(FieldError {
+                path: child_path(prefix, f),
+                expected: "a string",
+            });
         }
     }
     for f in ["options", "settings", "headers", "body"] {
         if obj.get(f).is_some_and(|p| p.value.as_object().is_none()) {
-            return true;
+            errors.push(FieldError {
+                path: child_path(prefix, f),
+                expected: "an object",
+            });
         }
     }
     if obj.get("env").is_some_and(|p| p.value.as_array().is_none()) {
-        return true;
+        errors.push(FieldError {
+            path: child_path(prefix, "env"),
+            expected: "an array",
+        });
     }
-    if let Some(models) = obj.get_object("models") {
-        for prop in &models.properties {
-            let Some(model) = prop.value.as_object() else {
-                return true;
-            };
-            if model
-                .get("name")
-                .is_some_and(|p| p.value.as_string_lit().is_none())
-                || model
-                    .get("id")
-                    .is_some_and(|p| p.value.as_string_lit().is_none())
-                || model
-                    .get("modelID")
-                    .is_some_and(|p| p.value.as_string_lit().is_none())
-            {
-                return true;
-            }
-            if model
-                .get("limit")
-                .is_some_and(|p| p.value.as_object().is_none())
-            {
-                return true;
-            }
-            if let Some(limit) = model.get_object("limit") {
+
+    errors
+}
+
+fn collect_model_invalid_fields(
+    model: &JObject,
+    dialect: Dialect,
+    prefix: &[String],
+    errors: &mut Vec<FieldError>,
+) {
+    for f in ["name", "id", "modelID"] {
+        if model
+            .get(f)
+            .is_some_and(|p| p.value.as_string_lit().is_none())
+        {
+            errors.push(FieldError {
+                path: child_path(prefix, f),
+                expected: "a string",
+            });
+        }
+    }
+    if let Some(prop) = model.get("limit") {
+        match prop.value.as_object() {
+            None => errors.push(FieldError {
+                path: child_path(prefix, "limit"),
+                expected: "an object",
+            }),
+            Some(limit) => {
+                let limit_prefix = child_path(prefix, "limit");
                 for leaf in ["context", "input", "output"] {
-                    match limit.get(leaf) {
-                        None => {}
-                        Some(prop) if prop.value.as_number_lit().is_some() => {
-                            if limit_number_is_invalid(&prop.value) {
-                                return true;
-                            }
+                    let valid = match limit.get(leaf) {
+                        None => true,
+                        Some(prop) => {
+                            prop.value.as_number_lit().is_some()
+                                && !limit_number_is_invalid(&prop.value)
                         }
-                        Some(_) => return true,
-                    }
-                }
-            }
-            if model
-                .get("reasoning")
-                .is_some_and(|p| p.value.as_boolean_lit().is_none())
-            {
-                return true;
-            }
-            if model
-                .get("capabilities")
-                .is_some_and(|p| p.value.as_object().is_none())
-            {
-                return true;
-            }
-            if dialect == Dialect::V1
-                && model
-                    .get("variants")
-                    .is_some_and(|p| p.value.as_object().is_none())
-            {
-                return true;
-            }
-            if dialect == Dialect::V2
-                && model
-                    .get("variants")
-                    .is_some_and(|p| p.value.as_array().is_none())
-            {
-                return true;
-            }
-            if dialect == Dialect::V2 {
-                if let Some(reasoning) = model
-                    .get_object("capabilities")
-                    .and_then(|capabilities| capabilities.get("reasoning"))
-                {
-                    let reasoning: JsonValue = reasoning.value.clone().into();
-                    if validate_v2_reasoning(&reasoning).is_err() {
-                        return true;
+                    };
+                    if !valid {
+                        errors.push(FieldError {
+                            path: child_path(&limit_prefix, leaf),
+                            expected: "a non-negative integer",
+                        });
                     }
                 }
             }
         }
     }
-    false
+    if model
+        .get("reasoning")
+        .is_some_and(|p| p.value.as_boolean_lit().is_none())
+    {
+        errors.push(FieldError {
+            path: child_path(prefix, "reasoning"),
+            expected: "a boolean",
+        });
+    }
+    if model
+        .get("capabilities")
+        .is_some_and(|p| p.value.as_object().is_none())
+    {
+        errors.push(FieldError {
+            path: child_path(prefix, "capabilities"),
+            expected: "an object",
+        });
+    }
+    if dialect == Dialect::V1
+        && model
+            .get("variants")
+            .is_some_and(|p| p.value.as_object().is_none())
+    {
+        errors.push(FieldError {
+            path: child_path(prefix, "variants"),
+            expected: "an object",
+        });
+    }
+    if dialect == Dialect::V2
+        && model
+            .get("variants")
+            .is_some_and(|p| p.value.as_array().is_none())
+    {
+        errors.push(FieldError {
+            path: child_path(prefix, "variants"),
+            expected: "an array",
+        });
+    }
+    if dialect == Dialect::V2 {
+        if let Some(reasoning) = model
+            .get_object("capabilities")
+            .and_then(|capabilities| capabilities.get("reasoning"))
+        {
+            let reasoning: JsonValue = reasoning.value.clone().into();
+            if validate_v2_reasoning(&reasoning).is_err() {
+                errors.push(FieldError {
+                    path: child_path(&child_path(prefix, "capabilities"), "reasoning"),
+                    expected: "a valid reasoning settings object",
+                });
+            }
+        }
+    }
+}
+
+/// Append one segment to a path, without touching the caller's slice.
+fn child_path(prefix: &[String], segment: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(prefix.len() + 1);
+    out.extend_from_slice(prefix);
+    out.push(segment.to_string());
+    out
 }
 
 fn limit_number_is_invalid(value: &JValue) -> bool {
