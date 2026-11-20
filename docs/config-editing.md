@@ -583,10 +583,17 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 | `Ignored {n} provider entries that did not contain a usable model ID.` | **不是错误**，是信息：部分返回项缺可用 ID 被跳过。 |
 | `Provider returned more than {MAX_MODELS} model IDs; the inventory was truncated.` | 返回项超过上限（10000）被截断。 |
 
-> **但状态码不能反推「端点存不存在」。** 很多 provider（实测包括 Anthropic 和 OpenAI）**在路由之前先判认证**，
-> 所以 `/v1/messages/models` 这种并不存在的路径也返回 401，而不是 404。
-> 于是 401 只说明「有个认证检查在这儿」，**不说明路径对**；反过来 404 也不见得是路径错。
-> 上表是「先查什么」的顺序建议，**不是「状态码 = 原因」的映射**。
+> **这张表有适用条件：它说的是「你自己没配凭据时」看到的状态码。**
+>
+> 很多 provider 在你**带了凭据**时是**先判认证、后判路由**——实测 `api.anthropic.com`：
+> 带一个假 token 打 `/v1/models` 和打一条根本不存在的 `/v1/zzz`，返回的是**同一个 401**。
+> 所以配好 key 之后，401 只说明「认证没过」，**不再携带路径信息**；404 也不证明路径错。
+>
+> 反过来，**不带任何凭据**时它是先路由的：`/v1/models` 给 401（要认证 = 路径在）、
+> `/v1/zzz` 给 404（路径不在）。**这就是上表能成立的前提。**
+>
+> 上表是「先查什么」的顺序建议，**不是「状态码 = 原因」的映射**。判断端点存不存在，
+> 唯一可靠的离线办法是**同 host 打一条明显不存在的路径做对照**，看两条状态码是否不同。
 
 #### 过了第一道门之后：四种结局
 
@@ -690,8 +697,9 @@ baseURL 的路径非空  →  <baseURL>/models
 > **处置**：看到「Provider returned HTTP 404 Not Found.」这条（由 `Provider returned HTTP {status} {reason}.` 填出的实例）且 baseURL 只有域名时，
 > 先补上 `/v1` 再查别的。**其他四家的默认 base 都自带 `/v1`，所以这条几乎只在手写配置时出现。**
 
-> 【推】这一条基于 `models_endpoint` 的代码路径 + 匿名实测（`/v1/models` → 401 存在，
-> `/models` → 404）。**没有对真实 provider 发起过带凭据的请求。**
+> 【测】+【码】：路径怎么拼是【码】（上面的规则）；
+> `/v1/models` 存在、`/models` 与 `/v1/messages/models` 不存在，
+> 是**无凭据对照实测**（见上「状态码的适用条件」）。**但没有对任何 provider 发起过带真实凭据的请求。**
 
 **base 该写到哪里**——`models_endpoint` 的规则是「路径末尾不是 `/models` 就补 `/models`」：
 
@@ -701,7 +709,7 @@ baseURL 的路径非空  →  <baseURL>/models
 | `https://api.anthropic.com/v1` | `/v1/models` | ✅ |
 | `https://api.anthropic.com/v1/`（尾斜杠） | `/v1/models` | ✅ |
 | `https://api.anthropic.com/v1/models` | 原样不动 | ✅ |
-| `https://api.anthropic.com/v1/messages` | `/v1/messages/models` | ❌ |
+| `https://api.anthropic.com/v1/messages` | `/v1/messages/models` | ❌ **该路径不存在**（无凭据对照实测） |
 
 > **最后一行最容易踩，也最不像"URL 写错"**：如果你把推理端点的完整地址填进 `baseURL`，
 > 拼出来是 `/v1/messages/models`——**看起来像个合法路径**，而报错里会带上它。
