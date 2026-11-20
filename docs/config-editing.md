@@ -609,8 +609,8 @@ Fix the listed field(s) before editing this file.
 | --- | --- | --- | --- |
 | **1. 硬错误** | 一条红色错误（如 `Provider returned an unexpected model listing format.`） | 请求失败，或返回的根本不是能认的 JSON | 按上面的提示表处理。**明确失败**，不用猜。 |
 | **2. 软失败** | **列表为空** + 两条 warning：`Ignored {n} provider entries that did not contain a usable model ID.` 和 `Provider returned no model IDs.` | 请求**成功**了，容器也认出来了，但每一项都没找到可用的 ID 字段 | ⚠️ 见下。**这是已知限制，不是你的配置错**。 |
-| **3. 成功但有提示** | 有模型，但带 `Provider indicated that more models may be available; the inventory may be truncated.` | 拉到一部分，供应商还有下一页，**且分页字段在识别范围内** | 列表不全，但**有提示**（目前是 Anthropic）。见下。 |
-| **4. 成功但静默截断** | 有模型、**无任何 warning** | 拉到一页就停了，但这一家的分页字段我们不认识 | ⚠️ **完全没有信号**。见下。 |
+| **3. 成功但有提示** | 带 `Provider indicated that more models may be available; the inventory may be truncated.` | 已识别分页信号，但未拉完所有页 | 已返回成功读取的页。需要时手工补充模型 ID，见下。 |
+| **4. 成功但静默截断** | 有模型、没有截断提示 | 响应可能分页，但这一家的分页字段不在识别范围内 | 对照供应商的模型列表核实数量，见下。 |
 
 **结局 2 最容易被误判**：它长得像「这家没有模型」，实际是「这家用的字段名我们不认」。
 它会给出 warning，**不是完全静默**——但那两条提示说的是"没找到可用的模型 ID"，
@@ -634,14 +634,14 @@ Fix the listed field(s) before editing this file.
 而这几家用 `name`（如 `"name": "models/gemini-2.5-pro"`）。容器 `models` 数组能认出来，
 但元素没有那四个键，于是每项都被计入 `skipped`，最终 0 个模型。
 
-**结局 4 没有任何提示**，这是最危险的一档：列表看着正常，其实只有第一页。已知的有：
+**结局 4 没有截断提示**。列表可能只包含第一页。
 
 下表是**接入时需要处理的协议差异**，不是说这些供应商现在都能拉。前提是它们已经通过上面的包检查。
 **【推】** 分页字段名与默认每页条数引自 @Anna 的官方文档核实（2026-11-20），**本项目未用真实凭据打过这些端点**。
 
 **识别范围是两边都要说的**：只说「认哪些」会高估覆盖，只说「不认哪些」会低估。`object_has_more`（`inventory.rs` 的 `object_has_more`）实际是：
 
-| 认得（会给你提示，结局 3） | 不认得（静默截断，结局 4） |
+| 认得（未拉完时提示，结局 3） | 不认得（可能静默截断，结局 4） |
 | --- | --- |
 | `has_more`（顶层） | `nextPageToken`（Gemini、Fireworks） |
 | `pagination.has_more`（嵌套一层） | `next_page_token`（Cohere） |
@@ -654,7 +654,7 @@ Fix the listed field(s) before editing this file.
 
 | 供应商 | 分页字段 | 会被识别吗 | 默认每页 |
 | --- | --- | --- | --- |
-| Anthropic | `has_more` | ✅ 会（结局 3） | 20 |
+| Anthropic | `has_more` + `last_id` | ✅ 会按游标继续拉取 | 20 |
 | **Gemini** | `nextPageToken` | ❌ **不会** | 50 |
 | **Cohere** | `next_page_token` | ❌ **不会** | 20 |
 | **Fireworks** | `nextPageToken` | ❌ **不会** | 50 |
@@ -669,10 +669,11 @@ Fix the listed field(s) before editing this file.
 
 #### Anthropic 的默认页大小与截断提示
 
-官方 `/v1/models` 的默认页大小为 20。工具只请求第一页，看到 `has_more: true` 时会显示列表可能截断的提示。
-没有提示只表示工具没有识别到分页信号。兼容网关可能使用不同的分页字段。
-
-如需添加第一页以外的模型，请手工填写模型 ID。
+官方 `/v1/models` 的默认页大小为 20。Anthropic 和采用相同分页格式的兼容网关返回顶层
+`has_more: true` 及有效的 `last_id` 时，工具会向同一端点发送带 `after_id` 的下一次请求。
+每次拉取最多 50 页、10,000 个唯一模型 ID、15 秒 HTTP 请求时间和 16 MiB 响应体。
+若缺少可用游标、游标重复、达到上限或后续页拉取失败，工具会保留成功读取的页并提示列表可能截断。
+采用其他分页字段的兼容网关可能没有截断提示。若确认有缺失，请手工填写模型 ID。
 
 ### Anthropic 接入的已知限制
 
@@ -729,7 +730,7 @@ baseURL 的路径非空  →  <baseURL>/models
 | `https://api.example.com/v1?page=2&limit=10` | `/v1/models`（query 全没了） |
 
 **所以不要指望用 `?limit=1000` 之类去影响分页**——传不进去，而且**不会有任何提示**。
-工具只取第一页，响应中的分页信号用于显示提示。
+Anthropic 后续请求的 `after_id` 由工具从服务端游标生成，其他协议仍只拉取第一页。
 
 > 这两条（base 补 `/models`、query 被清）**是同一类问题**：你以为自己传了个东西，
 > 它被静默丢掉了。**静默丢弃比报错更难诊断**，因为报错至少给了你一个信号。

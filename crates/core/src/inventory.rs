@@ -1,9 +1,9 @@
-//! Explicit, read-only OpenAI-compatible provider model inventory.
+//! Explicit, read-only OpenAI-compatible and Anthropic provider model inventory.
 //!
 //! This module reads the single configuration file supplied by the shell and
 //! only inspects the selected provider entry. Credentials referenced by that
 //! entry (inline values, `{env:...}` / `{file:...}` references, or configured
-//! headers) are resolved into backend memory for this one request. They are
+//! headers) are resolved into backend memory for this inventory fetch. They are
 //! never written to results, warnings or errors.
 //!
 //! The request is always a GET to the provider's model-list endpoint. The
@@ -14,10 +14,10 @@
 //! followed, and successful plain-HTTP responses carry an explicit warning
 //! that the exchange was unencrypted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
@@ -32,6 +32,7 @@ const RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_MODELS: usize = 10_000;
+const MAX_INVENTORY_PAGES: usize = 50;
 
 const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 const OPENROUTER_DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
@@ -98,43 +99,52 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
         .build()
         .map_err(|_| "Could not initialize the provider HTTP client.".to_string())?;
 
-    // `send()` resolves once response headers arrive, so a failure here is a
-    // transport-layer error with no HTTP status to report.
-    let mut response = client
-        .get(endpoint)
-        .headers(headers)
-        .send()
+    let started = Instant::now();
+    let mut remaining_bytes = RESPONSE_MAX_BYTES;
+    let mut page_url = endpoint.clone();
+    let mut seen_cursors = BTreeSet::new();
+    let mut model_ids = BTreeSet::new();
+    let mut skipped_entries = 0;
+    let mut has_more = false;
+    for page in 1..=MAX_INVENTORY_PAGES {
+        let remaining_time = REQUEST_TIMEOUT.saturating_sub(started.elapsed());
+        if page > 1 && (remaining_time.is_zero() || remaining_bytes == 0) {
+            break;
+        }
+        let listing = match fetch_inventory_page(
+            &client,
+            page_url,
+            &headers,
+            remaining_time,
+            &mut remaining_bytes,
+        )
         .await
-        .map_err(|_| "Provider model listing request failed (network or TLS error).".to_string())?;
-    let status = response.status();
+        {
+            Ok(listing) => listing,
+            Err(error) if page == 1 => return Err(error),
+            // Keep completed pages and their truncation warning.
+            Err(_) => break,
+        };
+        model_ids.extend(listing.model_ids);
+        skipped_entries += listing.skipped_entries;
+        has_more = listing.has_more;
 
-    if status.is_redirection() {
-        return Err(
-            "Provider returned an HTTP redirect; redirects are not followed for credential safety."
-                .to_string(),
-        );
+        if !protocol.is_anthropic() || model_ids.len() >= MAX_MODELS || page == MAX_INVENTORY_PAGES
+        {
+            break;
+        }
+        let Some(cursor) = listing
+            .next_anthropic_cursor
+            .filter(|cursor| seen_cursors.insert(cursor.clone()))
+        else {
+            break;
+        };
+        // Treat the cursor as a value and keep every request on the configured endpoint.
+        page_url = endpoint.clone();
+        page_url.query_pairs_mut().append_pair("after_id", &cursor);
     }
-    if !status.is_success() {
-        let reason = status.canonical_reason().unwrap_or("error");
-        return Err(format!(
-            "Provider returned HTTP {} {}.",
-            status.as_u16(),
-            reason
-        ));
-    }
-
-    let bytes = read_capped_body(&mut response, RESPONSE_MAX_BYTES).await?;
-
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Provider returned an unexpected model listing format.".to_string())?;
-    let listing = extract_model_ids(&value)?;
-
-    let mut model_ids = listing.model_ids;
-    let mut truncated_by_limit = false;
-    if model_ids.len() > MAX_MODELS {
-        model_ids.truncate(MAX_MODELS);
-        truncated_by_limit = true;
-    }
+    let truncated_by_limit = model_ids.len() > MAX_MODELS;
+    let model_ids: Vec<_> = model_ids.into_iter().take(MAX_MODELS).collect();
 
     let mut warnings = Vec::new();
     if let Some(warning) = plaintext_transport {
@@ -144,13 +154,13 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
         "This response only reports model identifiers; it does not verify model capabilities or runtime compatibility."
             .to_string(),
     );
-    if listing.skipped_entries > 0 {
+    if skipped_entries > 0 {
         warnings.push(format!(
             "Ignored {} provider entries that did not contain a usable model ID.",
-            listing.skipped_entries
+            skipped_entries
         ));
     }
-    if listing.has_more {
+    if has_more {
         warnings.push(
             "Provider indicated that more models may be available; the inventory may be truncated."
                 .to_string(),
@@ -177,6 +187,46 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
         fetched_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         warnings,
     })
+}
+
+async fn fetch_inventory_page(
+    client: &reqwest::Client,
+    endpoint: Url,
+    headers: &HeaderMap,
+    timeout: Duration,
+    remaining_bytes: &mut usize,
+) -> Result<ExtractedListing, String> {
+    // `send()` resolves once response headers arrive, so a failure here is a
+    // transport-layer error with no HTTP status to report.
+    let mut response = client
+        .get(endpoint)
+        .headers(headers.clone())
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|_| "Provider model listing request failed (network or TLS error).".to_string())?;
+    let status = response.status();
+
+    if status.is_redirection() {
+        return Err(
+            "Provider returned an HTTP redirect; redirects are not followed for credential safety."
+                .to_string(),
+        );
+    }
+    if !status.is_success() {
+        let reason = status.canonical_reason().unwrap_or("error");
+        return Err(format!(
+            "Provider returned HTTP {} {}.",
+            status.as_u16(),
+            reason
+        ));
+    }
+
+    let bytes = read_capped_body(&mut response, *remaining_bytes).await?;
+    *remaining_bytes -= bytes.len();
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "Provider returned an unexpected model listing format.".to_string())?;
+    extract_model_ids(&value)
 }
 
 #[derive(Debug)]
@@ -380,7 +430,7 @@ enum OpenAiProtocol {
 }
 
 impl OpenAiProtocol {
-    /// `false` only for the two Anthropic variants, which need the
+    /// `true` only for the two Anthropic variants, which need the
     /// `anthropic-version` request header.
     fn is_anthropic(self) -> bool {
         matches!(
@@ -870,15 +920,24 @@ struct ExtractedListing {
     model_ids: Vec<String>,
     skipped_entries: usize,
     has_more: bool,
+    next_anthropic_cursor: Option<String>,
 }
 
 fn extract_model_ids(value: &Value) -> Result<ExtractedListing, String> {
     let mut skipped_entries = 0usize;
     let mut model_ids = Vec::new();
     let mut has_more = false;
+    let mut next_anthropic_cursor = None;
 
     if let Some(root) = value.as_object() {
         has_more = object_has_more(root);
+        if root.get("has_more").and_then(Value::as_bool) == Some(true) {
+            next_anthropic_cursor = root
+                .get("last_id")
+                .and_then(Value::as_str)
+                .filter(|cursor| !cursor.trim().is_empty())
+                .map(str::to_owned);
+        }
 
         if let Some(data) = root.get("data").and_then(Value::as_array) {
             collect_array_ids(data, &mut model_ids, &mut skipped_entries);
@@ -901,14 +960,11 @@ fn extract_model_ids(value: &Value) -> Result<ExtractedListing, String> {
         return Err("Provider returned an unexpected model listing format.".to_string());
     }
 
-    model_ids.retain(|id| !id.trim().is_empty());
-    model_ids.sort();
-    model_ids.dedup();
-
     Ok(ExtractedListing {
         model_ids,
         skipped_entries,
         has_more,
+        next_anthropic_cursor,
     })
 }
 
