@@ -160,37 +160,89 @@ impl FieldError {
 /// This is deliberately separate from `display_edit_path`: that one renders edit
 /// paths a user constructed, this one renders keys a user may not have looked at.
 fn display_diagnostic_path(path: &[String]) -> String {
-    // One character is reserved for the truncation ellipsis before anything is
-    // written, so appending it can never exceed the cap and no subtraction along
-    // the way can underflow.
+    // The leaf is the part that says what is wrong, so it is reserved first and
+    // the ancestors are what gets shortened. A path like
+    // `providers.<a very long id>.models.m.limit` must still end in `limit`,
+    // otherwise the message names a location but not the problem.
+    //
+    // One character is also reserved for the truncation ellipsis before anything
+    // is written, so appending it can never exceed the cap and no subtraction
+    // along the way can underflow.
     let mut budget = MAX_DIAGNOSTIC_PATH.saturating_sub(1);
-    let mut out = String::new();
-    let mut truncated = false;
+    if path.is_empty() {
+        return String::new();
+    }
 
-    for (index, segment) in path.iter().enumerate() {
-        // A separator costs one character, and only exists between segments.
+    // Reserve the leaf (and the separator that introduces it) out of the budget.
+    let leaf = &path[path.len() - 1];
+    let leaf_width = segment_width(leaf).min(MAX_DIAGNOSTIC_KEY);
+    let leaf_cost = leaf_width + usize::from(path.len() > 1);
+    if leaf_cost > budget {
+        // Pathologically tiny budget: render the leaf alone, truncated if needed.
+        let mut out = String::new();
+        let mut leaf_budget = budget;
+        let complete = push_diagnostic_segment(&mut out, leaf, &mut leaf_budget);
+        if !complete {
+            out.push('…');
+        }
+        return out;
+    }
+
+    // Walk the ancestors into a scratch buffer with what is left.
+    let mut head = String::new();
+    let mut head_budget = budget - leaf_cost;
+    let mut truncated = false;
+    for (index, segment) in path[..path.len() - 1].iter().enumerate() {
         let separator = usize::from(index > 0);
-        // `push_diagnostic_segment` needs `separator + 2` in the worst case (a
-        // quoted, empty key); if that does not fit, stop before writing rather
-        // than writing and discovering it afterwards.
-        if budget < separator + 2 {
+        // A visible truncation mark costs one character, so leave room for it.
+        if head_budget < separator + 2 {
             truncated = true;
             break;
         }
         if index > 0 {
-            out.push('.');
-            budget -= 1;
+            head.push('.');
+            head_budget -= 1;
         }
-        if !push_diagnostic_segment(&mut out, segment, &mut budget) {
+        if !push_diagnostic_segment(&mut head, segment, &mut head_budget) {
             truncated = true;
             break;
         }
     }
 
+    let mut out = head;
     if truncated {
         out.push('…');
     }
+    if !out.is_empty() {
+        out.push('.');
+    }
+    let mut leaf_budget = budget;
+    let _ = push_diagnostic_segment(&mut out, leaf, &mut leaf_budget);
     out
+}
+
+/// How many characters a key would render as, before any budget is applied.
+fn segment_width(segment: &str) -> usize {
+    let plain = segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
+    let body: usize = segment.chars().map(rendered_char_len).sum();
+    if plain {
+        body
+    } else {
+        body + 2
+    }
+}
+
+/// How many characters one source character renders as.
+fn rendered_char_len(c: char) -> usize {
+    if c.is_control() {
+        c.escape_debug().count()
+    } else if c == '\\' || c == '"' {
+        2
+    } else {
+        1
+    }
 }
 
 /// Render one key into `out`, spending at most `budget` characters of it.
@@ -4084,6 +4136,7 @@ mod diagnostic_path_tests {
     }
 
     #[test]
+    #[test]
     fn a_budget_that_ends_exactly_on_the_cap_does_not_overflow() {
         // A single key can never render longer than MAX_DIAGNOSTIC_KEY, so one
         // huge key is stopped by the per-key limit before the path budget is
@@ -4107,14 +4160,39 @@ mod diagnostic_path_tests {
         let many: Vec<&str> = (0..10).map(|_| segment.as_str()).collect();
         let rendered = assert_within_cap(&many);
         assert!(
-            rendered.ends_with('…'),
-            "a path past the overall cap must be truncated: {rendered:?}"
+            rendered.contains("…"),
+            "a path past the overall cap must show where it was shortened: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("kkkk"),
+            "the last segment is kept whole, not cut: {rendered:?}"
         );
 
         // A quoted key has to pay for its quotes out of the same budget; this
         // is the case the old code could underflow on.
         let quoted = format!("{}.{}", "k".repeat(150), "j".repeat(150));
         let _ = assert_within_cap(&[quoted.as_str()]);
+    }
+
+    #[test]
+    fn the_leaf_is_kept_even_when_a_long_ancestor_exhausts_the_budget() {
+        // The leaf is what says which field is wrong, so an over-long provider
+        // id must shorten the ancestors, never drop the leaf. A path that ends
+        // in an ellipsis names a location but not the problem.
+        let long_id = "k".repeat(400);
+        let rendered = assert_within_cap(&["providers", long_id.as_str(), "models", "m", "limit"]);
+        assert!(
+            rendered.ends_with(".limit"),
+            "the leaf must survive truncation: {rendered:?}"
+        );
+        assert!(
+            rendered.starts_with("providers."),
+            "the path must still start at the document root: {rendered:?}"
+        );
+        assert!(
+            rendered.contains('…'),
+            "the shortened part must be marked: {rendered:?}"
+        );
     }
 
     #[test]
