@@ -18,24 +18,15 @@
 #             separate them.
 #   DOES NOT: prove a required excerpt's fixed id is bound to the right sentence.
 #             Swapping two markers passes -- both sentences are real source strings.
-#   DOES NOT: apply the message-boundary rule to excerpts without a placeholder. Those
-#             are compared as verbatim substrings, so text added before or after them in
-#             the source goes unnoticed. Only placeholder-bearing excerpts get the
-#             boundary test, because a placeholder is what made their spelling ambiguous.
-#             State it here because a protection that covers only some excerpts, with
-#             no stated range, reads as covering all of them.
-#   DOES NOT: follow how the message is assembled. What it checks is that the character
-#             right before the excerpt is a double quote -- a cheap stand-in for "the
-#             excerpt starts where some literal starts", not the thing itself. So a
-#             prefix kept out of that literal passes (`concat!`, `[..].concat()`,
-#             `String + &str`, `format!`; all four measured), and so does a prefix
-#             inside it whose last character happens to be a quote (`\"`, or a literal
-#             quote inside a raw string; both measured). Only a prefix inside the literal
-#             ending in an ordinary character breaks the quote, and that fails. The
-#             stand-in cannot see whether the quote is escaped, which is why it is a
-#             stand-in and not the real question. Do not turn that into a list of the
-#             spellings that happen to work: the character test has more ways to be
-#             fooled than anyone has enumerated.
+#   For ordinary excerpts containing placeholders, at least one match in the
+#   normalised source must have a double quote immediately before it and a double
+#   quote, a space, or the end of the text immediately after it. Ordinary excerpts
+#   without placeholders use a verbatim substring check.
+#   DOES NOT: follow how the message is assembled. A quote inside a literal can
+#             satisfy the left boundary, including an escaped quote or a quote in
+#             a raw string. A separately assembled prefix can also leave the text
+#             match intact. Text examples using `concat!`, `[..].concat()`,
+#             `String + &str`, and `format!` all passed the script check.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
@@ -154,7 +145,7 @@ function ConvertTo-NormalisedText {
 }
 
 # Does `$Needle` start a real message in the (already normalised) source, without being
-# the whole message? "Starts" = sits right after a `"` or a newline.
+# the whole message? The match must immediately follow a double quote.
 #
 # Called ONLY for excerpts that do not end with a period. For those, a SPACE after the
 # match means the source sentence keeps going -- that is what a truncated excerpt looks
@@ -192,21 +183,13 @@ function Test-LiteralStartsMessage {
 #   3. the doc excerpt is missing its final period, or stops mid-sentence at `so its`
 #      -- a substring that ends early is always present in its own continuation.
 #
-# So a hit only counts when the excerpt STARTS a message and ENDS one. What counts:
-#   start: immediately after `\"` (the opening quote of the Rust literal). NOT after a
-#          bare newline: a literal that begins with `Lookup failed:` and then breaks the
-#          line would otherwise let the original sentence on the next line count as a
-#          message start, hiding the prefix.
-#   end:   a `\"`, a SPACE, or end of source. NOT a bare newline, for the same reason in
-#          reverse: the message continues on that next line.
+# Check the characters immediately adjacent to a match in the normalised source.
+# A double quote must precede it. A double quote, a space, or the end of the text
+# must follow it. A newline fails either boundary. This comparison also counts
+# double quotes embedded inside literals.
 #
-# The space is load-bearing and is why this is not simply "quoted on both sides".
-# Several messages here open with one sentence and then continue -- "...protocol is
-# unknown. Add an official OpenAI or Anthropic `package`/`npm` setting...". A doc may
-# rightly quote only the first sentence, which ends at a period followed by a space.
-# Requiring the quote would reject those and force docs to carry advice they don't
-# need. Normalisation has already collapsed placeholders, so `"` here is the source's
-# own quote character, not a backtick.
+# The space allows excerpts that quote just the complete first sentence of a
+# longer message, such as "...protocol is unknown." followed by setup advice.
 function Test-LiteralPresentNormalised {
     param([string]$Source, [string]$Literal)
     $needle = ConvertTo-NormalisedText -Text $Literal
