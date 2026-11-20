@@ -28,6 +28,56 @@ Logs, the browser script, result JSON and screenshots are stored locally under `
 | Native commands are restricted to authorized sources | Tauri shell | Compile check plus path/command scope inspection; invalid path/preview rejection tests where available |
 | Release assets run on supported systems; Windows requires no application installation | Release validation | Windows 11: copy only the portable exe to an otherwise empty directory, launch and scan a fixture; Ubuntu 22.04/24.04: install/start deb and launch AppImage; checksums and artifact list |
 
+## Not verified: needs real credentials (2026-11-20)
+
+These are **open, not missing**. The distinction matters: "not checked yet" means someone should go and
+check; these mean the condition to check them does not exist here, and we should not ask anyone to
+provide keys for it.
+
+**No real provider credentials were used anywhere in this project.** Every statement below that
+concerns live provider responses is therefore inferred, not measured.
+
+| # | Unresolved question | Why it cannot be settled now | Condition to settle it |
+| --- | --- | --- | --- |
+| 1 | Anthropic: does a **valid** key actually return 200 over `Authorization: Bearer`? | **Narrowed on 2026-11-20, not closed.** Anonymous probes with fake keys show the server routes `Bearer sk-ant-*` to its API-key validator (the 401 says `invalid x-api-key`; a Bearer without the `sk-ant-` prefix gets a different error, `Invalid bearer token`). So the credential *shape* is accepted. That still does not prove a valid key succeeds. | A valid Anthropic key; one `GET /v1/models`, record status code only. |
+| 2 | Azure v1: does the existing Bearer flow work under either `api-key` or `authorization` scheme? | Requires a real Azure resource and deployment. | A real Azure endpoint + key. |
+| 3 | Azure v1: can the `id` from `/models` be used directly as the model value? | Azure inference expects a *deployment name*, which may differ from the model `id` in meaning, not just in format. | A real Azure deployment; compare listed `id` against a working model value. |
+| 4 | Gemini: does the `models/` prefix appear on every entry, and can it be stripped uniformly? | Derived from official docs only; never observed in a real response. | A real Gemini key; inspect one `/models` response body. |
+| 5 | Pagination stability under real rate limiting for each provider. | Anonymous probes cannot trigger or observe provider rate limiting. | Real keys, and a provider account large enough to exceed one page. |
+
+Sources: items 1–5 are from the research lane (provider fact book) and the integration lane
+(`/models` difference list). This table is a transcription, so it inherits their evidence level, not
+higher: treat every row as inferred until someone actually performs the condition above.
+
+### A trap worth documenting separately: do not hand-write `x-api-key`
+
+The obvious workaround for item 1 — "let the user add `x-api-key` themselves in the config" —
+**fails silently when a credential can also be resolved normally.**
+
+`prepare_headers` adds `Authorization: Bearer <key>` whenever the configured headers do not already
+contain an `authorization` entry. It checks **only** `authorization`. It does **not** check whether
+the user already supplied `x-api-key`. So this configuration sends *two* credentials:
+
+| User config | What is actually sent | Anthropic response |
+| --- | --- | --- |
+| `x-api-key` set, and no `apiKey`/`env` resolvable | only `x-api-key` | normal (works if the key is valid) |
+| `x-api-key` set, **and** `apiKey`/`env` also resolves | **both** `x-api-key` and `Authorization: Bearer` | **401 — the request carries more than one credential; send exactly one** |
+| `authorization` set explicitly | the value the user set, nothing added | normal |
+
+The failure is a **401**, so it reads as "your key is wrong" when the key is fine. Until
+`prepare_headers` checks both headers, the advice is: **do not put `x-api-key` in the config**
+unless that provider has no `apiKey`/`env` that resolves to a credential.
+
+Established from source (`prepare_headers` tests only for `authorization` before inserting `Bearer`);
+the 401 wording is from an anonymous probe and so is one step below a real success.
+
+Two adjacent facts that *are* established from source, and must not be confused with the table:
+
+- The request builder calls `set_query(None)`, so query parameters are dropped. Endpoints that carry a
+  version in the query string cannot work. This is read from source, not inferred.
+- Model-ID extraction accepts only `id`, `model`, `model_id`, `modelId`. Responses using `name` yield
+  zero models. This is read from source, not inferred.
+
 ## Check layers
 
 1. Focused tests run by each implementation lane in its own scope.

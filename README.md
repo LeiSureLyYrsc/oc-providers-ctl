@@ -66,6 +66,15 @@ cargo test -p oc-providers-core
 cargo clippy -p oc-providers-core --all-targets -- -D warnings
 ```
 
+文档与代码一致性检查（校验 `docs/` 中引用的错误提示原文仍然存在于 Rust 源码中）：
+
+```sh
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-doc-strings.ps1
+```
+
+这条检查的意义：`docs/config-editing.md` 承诺「提示原文取自 `config.rs`」。一旦有人改了错误措辞而文档没跟上，
+这条检查就会失败，而不是让文档静静地变得不准确。改了错误文案请同步改文档。
+
 原生壳的编译检查、发布产物生成还需要相应平台依赖；这些检查与纯 Rust 核心测试分开运行。
 
 在 Windows 本地生成免安装应用：
@@ -99,9 +108,18 @@ npm run tauri build -- --no-bundle -- --locked
 
 ```text
 crates/core/         配置发现、解析与安全写回、公共目录、模型列表请求
+  src/config.rs      JSONC 格式保留读取/编辑/写回、备份、V1/V2 方言（包体主要部分）
+  src/catalog.rs     models.dev 公共目录下载与缓存、本地模糊搜索
+  src/inventory.rs   供应商 /models 端点拉取（仅列模型 ID，不发推理请求）
+  tests/             配置发现、编辑、Windows ACL、目录与模型列表的集成测试
 src-tauri/          桌面 IPC、安全范围与窗口
+  src/commands.rs    对前端暴露的 9 个 IPC 命令
 src/                中文管理界面、草案和预览流程
 docs/               边界契约与验证说明
+  IPC.md             前端 ↔ Rust 命令与 DTO 契约
+  config-editing.md  可编辑路径规则与错误处理（排错入口）
+  VERIFICATION.md    验证证据记录
+scripts/             辅助脚本（含文档错误字符串校验）
 .github/workflows/  检查和 Windows/Linux 发布
 ```
 
@@ -134,6 +152,15 @@ Linux 产物需要较老构建基线及目标系统启动验证。AppImage 不�
 第一版不启用自动更新，不包含 Windows Authenticode 证书。未签名应用可能触发系统安全警告；请从可信 Release 下载并检查 SHA-256，不建议关闭系统防护绕过。
 
 ## 设计与兼容性参考
+
+项目内文档：
+
+- [配置编辑规则与错误处置](docs/config-editing.md) — 想改某个字段前查这里；看到报错也查这里
+- [桌面边界契约（IPC）](docs/IPC.md) — 前端与 Rust 的命令、DTO、编辑规则
+- [验证证据记录](docs/VERIFICATION.md) — 每项声称对应的测试证据与限制
+- [变更日志](CHANGELOG.md)
+
+外部参考：
 
 - [OpenCode 配置](https://opencode.ai/v2/docs/config)
 - [OpenCode 模型与变体](https://opencode.ai/v2/docs/models)
