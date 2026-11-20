@@ -120,6 +120,12 @@ struct FieldError {
 /// for a person to act on, not a dump of the whole document.
 const MAX_REPORTED_FIELD_ERRORS: usize = 4;
 
+/// Longest single key rendered in a diagnostic before it is truncated.
+const MAX_DIAGNOSTIC_KEY: usize = 64;
+
+/// Longest whole path rendered in a diagnostic.
+const MAX_DIAGNOSTIC_PATH: usize = 200;
+
 /// Whatever the classification pass found that makes a file read-only.
 ///
 /// The three fields are deliberately separate: `mixes_syntax` may only be used
@@ -137,8 +143,80 @@ impl FieldError {
         let expected = self.expected;
         format!(
             "The configuration field `{}` must be {expected}.",
-            display_edit_path(&self.path)
+            display_diagnostic_path(&self.path)
         )
+    }
+}
+
+/// Render a key path for a message a person reads.
+///
+/// Keys come from the user's own file, so neither their length nor their
+/// contents are under our control. Three things keep them from wrecking the
+/// message: a key that is not plain `[A-Za-z0-9_-/:@]` is quoted, control
+/// characters inside it are escaped rather than emitted (a bare newline would
+/// break the line a terminal or dialog is building), and both a single key and
+/// the whole path are capped.
+///
+/// This is deliberately separate from `display_edit_path`: that one renders edit
+/// paths a user constructed, this one renders keys a user may not have looked at.
+fn display_diagnostic_path(path: &[String]) -> String {
+    let mut out = String::new();
+    for (index, segment) in path.iter().enumerate() {
+        if index > 0 {
+            out.push('.');
+        }
+        push_diagnostic_segment(&mut out, segment);
+        if out.chars().count() >= MAX_DIAGNOSTIC_PATH {
+            out.push('…');
+            break;
+        }
+    }
+    out
+}
+
+fn push_diagnostic_segment(out: &mut String, segment: &str) {
+    let plain = segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
+    if plain {
+        push_capped(out, segment);
+        return;
+    }
+    // Quote it, as `display_edit_path` does, so a key containing a dot cannot
+    // read as two extra levels of nesting.
+    out.push('"');
+    let mut remaining = MAX_DIAGNOSTIC_KEY;
+    for c in segment.chars() {
+        if remaining == 0 {
+            out.push('…');
+            break;
+        }
+        // `escape_debug` turns a control character into its visible escape
+        // (`\n`, `\u{1}`) instead of letting it through raw.
+        if c.is_control() {
+            for escaped in c.escape_debug() {
+                out.push(escaped);
+            }
+        } else if c == '\\' || c == '"' {
+            out.push('\\');
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+        remaining -= 1;
+    }
+    out.push('"');
+}
+
+fn push_capped(out: &mut String, segment: &str) {
+    let mut remaining = MAX_DIAGNOSTIC_KEY;
+    for c in segment.chars() {
+        if remaining == 0 {
+            out.push('…');
+            return;
+        }
+        out.push(c);
+        remaining -= 1;
     }
 }
 

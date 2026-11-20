@@ -1545,3 +1545,84 @@ fn a_file_with_both_problems_reports_the_field_and_the_mixture() {
         "a refused edit must leave the file byte-identical"
     );
 }
+
+#[test]
+fn diagnostic_path_escapes_control_characters_in_user_keys() {
+    // A provider id carrying a control character, written as a JSON escape so
+    // the fixture itself stays one line. The key reaches the refusal verbatim,
+    // so the rendered path must escape it rather than emit it raw.
+    let source = br#"{
+  "providers": {
+    "bad\u0001id": {
+      "package": "pkg",
+      "models": {
+        "m": { "modelID": "m", "limit": "not-an-object" }
+      }
+    }
+  }
+}
+"#;
+    let (_dir, path) = write_config("control.jsonc", source);
+    let doc = read_document(&path).expect("read");
+    assert!(!doc.writable, "a wrong-typed field must be read-only");
+
+    let err = prepare_changes(&path, &doc.hash, &[edit_set(&["model"], json!("a/b"))])
+        .expect_err("read-only");
+
+    // No raw control character may survive into a message a person reads.
+    assert!(
+        !err.chars().any(|c| c.is_control()),
+        "the refusal must not contain a raw control character: {err:?}"
+    );
+    // The escape is what replaces it, so the key is still identifiable.
+    assert!(
+        err.contains("\\u{1}"),
+        "the control character must appear as a visible escape: {err:?}"
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the message must still say what the field should be: {err}"
+    );
+
+    // The warning list is rendered from the same pass, so it must be equally
+    // safe: this is the "refusal and warnings stay consistent" half.
+    let warnings = doc.warnings.join("\n");
+    assert!(
+        !warnings.chars().any(|c| c.is_control()),
+        "the warning list must not contain a raw control character: {warnings:?}"
+    );
+}
+
+#[test]
+fn diagnostic_path_caps_an_overlong_key_and_still_names_the_field() {
+    let long_id = "k".repeat(400);
+    let source = format!(
+        "{{\n  \"providers\": {{\n    \"{long_id}\": {{\n      \"package\": \"pkg\",\n      \"models\": {{\n        \"m\": {{ \"modelID\": \"m\", \"limit\": \"not-an-object\" }}\n      }}\n    }}\n  }}\n}}\n"
+    );
+    let (_dir, path) = write_config("longkey.jsonc", source.as_bytes());
+    let doc = read_document(&path).expect("read");
+    assert!(!doc.writable);
+
+    let err = prepare_changes(&path, &doc.hash, &[edit_set(&["model"], json!("a/b"))])
+        .expect_err("read-only");
+
+    // The message must stay short enough to read even though the key is not.
+    assert!(
+        err.chars().count() < 600,
+        "an overlong key must not produce an overlong message, got {} chars",
+        err.chars().count()
+    );
+    assert!(
+        err.contains("must be an object"),
+        "the expected shape must survive truncation: {err}"
+    );
+    // The leaf and the model id are still named, so the message is still useful.
+    assert!(
+        err.contains(".limit`"),
+        "the offending field must still be identifiable: {err}"
+    );
+    assert!(
+        err.contains("providers."),
+        "the path must still start at the document root: {err}"
+    );
+}
