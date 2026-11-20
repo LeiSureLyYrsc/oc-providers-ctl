@@ -154,8 +154,8 @@ function Test-LiteralStartsMessage {
         $before = if ($at -eq 0) { '' } else { $Source.Substring($at - 1, 1) }
         $endAt = $at + $Needle.Length
         $after = if ($endAt -ge $Source.Length) { '' } else { $Source.Substring($endAt, 1) }
-        $starts = ($before -eq '"') -or ($before -eq "`n")
-        $continues = ($after -ne '"') -and ($after -ne "`n") -and ($after -ne '')
+        $starts = ($before -eq '"')
+        $continues = ($after -ne '"') -and ($after -ne '')
         if ($starts -and $continues) { return $true }
         $at++
     }
@@ -175,8 +175,12 @@ function Test-LiteralStartsMessage {
 #      -- a substring that ends early is always present in its own continuation.
 #
 # So a hit only counts when the excerpt STARTS a message and ENDS one. What counts:
-#   start: immediately after `"` (the opening quote of the Rust literal) or a newline.
-#   end:   a `"`, a newline, end of source, or a SPACE.
+#   start: immediately after `\"` (the opening quote of the Rust literal). NOT after a
+#          bare newline: a literal that begins with `Lookup failed:` and then breaks the
+#          line would otherwise let the original sentence on the next line count as a
+#          message start, hiding the prefix.
+#   end:   a `\"`, a SPACE, or end of source. NOT a bare newline, for the same reason in
+#          reverse: the message continues on that next line.
 #
 # The space is load-bearing and is why this is not simply "quoted on both sides".
 # Several messages here open with one sentence and then continue -- "...protocol is
@@ -194,8 +198,8 @@ function Test-LiteralPresentNormalised {
         $before = if ($at -eq 0) { '' } else { $hay.Substring($at - 1, 1) }
         $endAt = $at + $needle.Length
         $after = if ($endAt -ge $hay.Length) { '' } else { $hay.Substring($endAt, 1) }
-        $startsMessage = ($before -eq '"') -or ($before -eq "`n")
-        $endsMessage = ($after -eq '"') -or ($after -eq "`n") -or ($after -eq '') -or ($after -eq ' ')
+        $startsMessage = ($before -eq '"')
+        $endsMessage = ($after -eq '"') -or ($after -eq '') -or ($after -eq ' ')
         if ($startsMessage -and $endsMessage) { return $true }
         $at++
     }
@@ -406,9 +410,22 @@ foreach ($item in $literals) {
         if (-not (Test-LiteralPresent -Source $source -Literal ('"' + $item.Literal + '"'))) { $missing += $item }
         continue
     }
-    # Everything else may spell its placeholders differently, so compare normalised.
-    # An excerpt with no placeholder still lands on an exact substring match, because
-    # normalisation leaves it unchanged.
+    # Only excerpts that actually carry a placeholder go through the boundary test.
+    # An excerpt with none is compared as a plain substring, exactly as before.
+    #
+    # Why they differ: a placeholder is what makes the doc's spelling ambiguous, so
+    # only those need normalising, and only those used to be skipped for being
+    # unverifiable. Tightening a plain excerpt that was never ambiguous buys nothing
+    # and costs correctness -- a message containing no placeholder may legitimately be
+    # quoted as part of a longer line, and the old verbatim rule allowed that. Turning
+    # the new rule on it made ordinary, correct excerpts go red.
+    if ($item.Literal -notmatch '<|\{|\}') {
+        if (-not (Test-LiteralPresent -Source $source -Literal $item.Literal)) {
+            $missing += $item
+        }
+        continue
+    }
+    # An excerpt with a placeholder may spell it differently, so compare normalised.
     if (-not (Test-LiteralPresentNormalised -Source $source -Literal $item.Literal)) {
         $missing += $item
     }
