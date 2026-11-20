@@ -778,7 +778,7 @@ npm 就是 `@ai-sdk/anthropic`。
 - **查询串会被清空**：构造请求时 `set_query(None)`（`inventory.rs:503`）。
   若某家需要在 URL 上带参数（例如 Azure 的 `api-version`），当前会丢参数而失败。
 - **分页不跟进，而且只有部分供应商会提示**：代码只认 `has_more` / `pagination.has_more` /
-  `next` / `next_page` / `nextPage`（`inventory.rs:808-822`），且**不翻页**。
+  `next` / `next_page` / `nextPage`（`inventory.rs:808-823`），且**不翻页**。
   - Anthropic 用 `has_more` → **能识别**，会给结局 3 那条 warning，但列表仍只有一页（默认 20 条）。
   - **Gemini（`nextPageToken`）、Cohere（`next_page_token`）、Fireworks（`nextPageToken`）
     的分页字段不在识别范围内 → 连 warning 都没有**，看起来像"全部拉到了"。
