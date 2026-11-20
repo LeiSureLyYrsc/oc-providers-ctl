@@ -763,8 +763,17 @@ fn removing_an_absent_limit_leaf_is_still_rejected() {
     );
 }
 
-/// A `limit` block whose value is not an object stays an error, and the message
-/// must stay distinct from the "missing parent" case so the two are not confused.
+/// A `limit` block whose value is not an object must not be silently
+/// overwritten by a `Set`.
+///
+/// Note what actually stops it. `prepare_changes` rejects the whole file at the
+/// `unsafe_nesting` gate before per-edit validation runs, so the more specific
+/// `The `limit` field must be an object.` branch in `validate_creatable_block`
+/// is not what a user sees here -- and is unreachable from this entry point.
+/// `provider_has_invalid_types` already treats a non-object `limit` as an
+/// invalid type, which is what sets `unsafe_nesting`. This test pins the
+/// refusal and the message that really reaches the user; do not read it as
+/// coverage of the specific branch.
 #[test]
 fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
     let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"weird\": { \"name\": \"Weird\", \"limit\": 4096 }\n      }\n    }\n  }\n}\n";
@@ -784,8 +793,9 @@ fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
         "an invalid shape must not be reported as a missing parent: {err}"
     );
     assert_eq!(
-        err, "The `limit` field must be an object.",
-        "the malformed-block message must stay specific"
+        err, "This file contains an unsafe mixture of V1 and V2 provider syntax and is read-only.",
+        "the file-level gate is what fires; if this changes, the specific branch \
+         becomes live and this test should be split in two"
     );
 }
 
