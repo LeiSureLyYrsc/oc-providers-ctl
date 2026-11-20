@@ -24,10 +24,11 @@
 #             boundary test, because a placeholder is what made their spelling ambiguous.
 #             State it here because a protection that covers only some excerpts, with
 #             no stated range, reads as covering all of them.
-#   DOES NOT: follow `concat!`. It requires the quoted sentence to exist as a complete
-#             quoted literal. A prefix spliced in as its own literal passes while the
-#             final message differs; the same prefix written inside that one literal
-#             fails.
+#   DOES NOT: follow `concat!`. It requires the quoted sentence to START a source
+#             literal. A doc may still quote only a message's first sentence -- that is a
+#             substring beginning right after the opening quote, and it passes. A prefix
+#             spliced in as its own literal passes too, while the final message differs;
+#             the same prefix written inside that one literal fails.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
