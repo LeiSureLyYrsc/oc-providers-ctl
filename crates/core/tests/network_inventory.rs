@@ -1036,13 +1036,16 @@ async fn an_unsupported_package_names_both_supported_families() {
 #[tokio::test]
 async fn anthropic_page_without_a_cursor_produces_an_explicit_warning() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let server = MockServer::start(vec![ResponseSpec::json(
-        r#"{
+    let server = MockServer::start(vec![
+        ResponseSpec::json(
+            r#"{
             "data": [{"type": "model", "id": "claude-a"}, {"type": "model", "id": "claude-b"}],
             "has_more": true,
             "first_id": "claude-a"
         }"#,
-    )]);
+        ),
+        ResponseSpec::json(r#"{"data":[{"id":"unexpected"}]}"#),
+    ]);
     let config_path = config_with(
         &directory,
         "anthropic-truncated.json",
@@ -1066,7 +1069,7 @@ async fn anthropic_page_without_a_cursor_produces_an_explicit_warning() {
         "a partial page must warn rather than pass silently: {:?}",
         inventory.warnings
     );
-    assert_eq!(server.request_count(), 1);
+    assert_eq!(server.observed_count(), 1);
 }
 
 #[tokio::test]
@@ -1079,6 +1082,7 @@ async fn anthropic_inventory_follows_the_cursor_and_merges_raw_ids() {
         ResponseSpec::json(
             r#"{"data":[{"id":"claude-b"},{"id":" claude-a "}, {}],"has_more":false,"last_id":"unused"}"#,
         ),
+        ResponseSpec::json(r#"{"data":[{"id":"unexpected"}]}"#),
     ]);
     let config_path = config_with(
         &directory,
@@ -1105,8 +1109,9 @@ async fn anthropic_inventory_follows_the_cursor_and_merges_raw_ids() {
         .any(|warning| warning.contains("truncated")));
     assert_no_secret(&inventory, "fixture-key");
 
+    assert!(server.wait_for_requests(2, Duration::from_secs(2)));
+    assert_eq!(server.observed_count(), 2);
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].target, "/v1/models");
     let url = url::Url::parse(&format!("{}{}", server.base_url, requests[1].target))
         .expect("request URL");
@@ -1163,7 +1168,7 @@ async fn anthropic_inventory_stops_on_a_cursor_cycle() {
         .warnings
         .iter()
         .any(|warning| warning.contains("may be truncated")));
-    assert_eq!(server.request_count(), 3);
+    assert_eq!(server.observed_count(), 3);
 }
 
 #[tokio::test]
@@ -1190,7 +1195,7 @@ async fn anthropic_inventory_keeps_completed_pages_if_the_next_request_fails() {
         .iter()
         .any(|warning| warning.contains("may be truncated")));
     assert_no_secret(&inventory, "private upstream details");
-    assert_eq!(server.request_count(), 2);
+    assert_eq!(server.observed_count(), 2);
 }
 
 #[tokio::test]
@@ -1225,7 +1230,7 @@ async fn anthropic_inventory_stops_at_the_page_limit() {
         .warnings
         .iter()
         .any(|warning| warning.contains("may be truncated")));
-    assert_eq!(server.request_count(), 50);
+    assert_eq!(server.observed_count(), 50);
 }
 
 /// The common OpenCode shape names the provider `anthropic` and omits
