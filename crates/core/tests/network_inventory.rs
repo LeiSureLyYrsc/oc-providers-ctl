@@ -639,17 +639,22 @@ async fn unknown_or_malicious_packages_are_refused_without_a_request() {
     );
     assert!(!error.contains("package-secret"));
 
-    let native_anthropic = config_with(
+    // A native protocol that still has no inventory support. This used to be
+    // `@ai-sdk/anthropic`; that assertion pinned the Anthropic limitation and
+    // has been retargeted to Google now that Anthropic is supported. The test's
+    // intent is unchanged: a non-OpenAI-shaped protocol is refused by package,
+    // not attempted and failed later.
+    let unsupported_native = config_with(
         &directory,
-        "anthropic.json",
+        "unsupported-native.json",
         "provider",
-        "anthropic-custom",
+        "google-custom",
         &format!(
-            r#"{{ "npm": "@ai-sdk/anthropic", "options": {{ "baseURL": "{}/v1" }} }}"#,
+            r#"{{ "npm": "@ai-sdk/google", "options": {{ "baseURL": "{}/v1" }} }}"#,
             server.base_url
         ),
     );
-    let error = fetch_inventory(&native_anthropic, "anthropic-custom")
+    let error = fetch_inventory(&unsupported_native, "google-custom")
         .await
         .expect_err("unsupported native protocol");
     assert!(
@@ -1164,4 +1169,67 @@ async fn a_broken_api_key_reference_does_not_block_an_explicit_credential_header
         "a credentialed request must not be reported as unauthenticated: {:?}",
         inventory.warnings
     );
+}
+
+/// Every OpenAI family accepts both the bare and the `aisdk:`-prefixed package
+/// spelling, so the Anthropic family must too. A user copying the AI SDK
+/// package name out of their existing config must not hit a refusal that only
+/// affects Anthropic.
+#[tokio::test]
+async fn the_aisdk_anthropic_package_spelling_resolves_to_the_native_protocol() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{"data": [{"type": "model", "id": "claude-opus-5-5"}], "has_more": false}"#,
+    )]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-aisdk.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "aisdk:@ai-sdk/anthropic", "settings": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-aisdk" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("the aisdk: spelling must resolve like the bare one");
+    assert_eq!(inventory.model_ids, vec!["claude-opus-5-5"]);
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].header("anthropic-version"),
+        Some("2026-10-21"),
+        "the aisdk: spelling must still get the version header"
+    );
+}
+
+/// `@ai-sdk/anthropic-compatible` does not exist in the npm registry, so it
+/// must not be listed as supported: advertising a package nobody can install
+/// would send users looking for a dependency that is not published.
+#[tokio::test]
+async fn a_nonexistent_anthropic_compatible_aisdk_package_is_refused() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-fake-package.json",
+        "providers",
+        "gateway",
+        &format!(
+            r#"{{ "package": "aisdk:@ai-sdk/anthropic-compatible", "settings": {{ "baseURL": "{}/v1" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let error = fetch_inventory(&config_path, "gateway")
+        .await
+        .expect_err("an unpublished package must not be accepted");
+    assert!(
+        error.contains("unsupported package"),
+        "unexpected error: {error}"
+    );
+    assert!(server.requests().is_empty(), "no request may be made");
 }
