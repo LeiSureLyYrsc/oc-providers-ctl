@@ -687,6 +687,155 @@ fn invalid_jsonc_is_reported_read_only() {
     assert!(err.contains("parsed safely"));
 }
 
+/// A model that carries no `limit` block yet must still accept its leaf fields.
+///
+/// The user-visible symptom was "The parent object does not exist." when adding
+/// any limit value to a model that had no other parameters: validation demanded
+/// an existing `limit` object while the write path already auto-creates missing
+/// intermediate objects. Both dialects are covered, and both `limit` leaves the
+/// editor exposes are exercised.
+#[test]
+fn limit_leaves_are_creatable_when_the_model_has_no_limit_block() {
+    let v1 = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"bare\": { \"name\": \"Bare\" }\n      }\n    }\n  }\n}\n";
+    let (_dir, path) = write_config("bare-v1.jsonc", v1);
+    let before = read_document(&path).expect("read v1");
+    let prepared = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_set(
+            &["provider", "acme", "models", "bare", "limit", "context"],
+            json!(128000),
+        )],
+    )
+    .expect("creating limit.context on a model without limit must be allowed");
+    commit_changes(&prepared).expect("commit v1 limit");
+    let text = fs::read_to_string(&path).expect("read v1 back");
+    assert!(
+        text.contains("\"limit\": {"),
+        "limit block created in V1: {text}"
+    );
+    assert!(
+        text.contains("\"context\": 128000"),
+        "value written in V1: {text}"
+    );
+
+    let v2 = b"{\n  \"providers\": {\n    \"acme\": {\n      \"package\": \"@opencode/ai/providers/openai-compatible\",\n      \"models\": {\n        \"bare\": { \"modelID\": \"upstream/bare\" }\n      }\n    }\n  }\n}\n";
+    let (_dir2, path2) = write_config("bare-v2.jsonc", v2);
+    let before2 = read_document(&path2).expect("read v2");
+    let prepared2 = prepare_changes(
+        &path2,
+        &before2.hash,
+        &[edit_set(
+            &["providers", "acme", "models", "bare", "limit", "output"],
+            json!(8192),
+        )],
+    )
+    .expect("creating limit.output on a V2 model without limit must be allowed");
+    commit_changes(&prepared2).expect("commit v2 limit");
+    let text2 = fs::read_to_string(&path2).expect("read v2 back");
+    assert!(
+        text2.contains("\"limit\": {"),
+        "limit block created in V2: {text2}"
+    );
+    assert!(
+        text2.contains("\"output\": 8192"),
+        "value written in V2: {text2}"
+    );
+}
+
+/// Removing a limit leaf that is absent is still an error: only `Set` creates.
+#[test]
+fn removing_an_absent_limit_leaf_is_still_rejected() {
+    let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"partial\": { \"name\": \"Partial\", \"limit\": { \"context\": 1000 } }\n      }\n    }\n  }\n}\n";
+    let (_dir, path) = write_config("partial-limit.jsonc", source);
+    let before = read_document(&path).expect("read");
+    let err = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_remove(&[
+            "provider", "acme", "models", "partial", "limit", "output",
+        ])],
+    )
+    .expect_err("removing an absent leaf must not be allowed");
+    assert!(
+        err.contains("does not exist"),
+        "unexpected removal error: {err}"
+    );
+}
+
+/// A `limit` block whose value is not an object stays an error, and the message
+/// must stay distinct from the "missing parent" case so the two are not confused.
+#[test]
+fn a_malformed_limit_block_is_rejected_with_a_distinct_error() {
+    let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"weird\": { \"name\": \"Weird\", \"limit\": 4096 }\n      }\n    }\n  }\n}\n";
+    let (_dir, path) = write_config("weird-limit.jsonc", source);
+    let before = read_document(&path).expect("read");
+    let err = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_set(
+            &["provider", "acme", "models", "weird", "limit", "context"],
+            json!(2048),
+        )],
+    )
+    .expect_err("a non-object limit block must not be overwritten implicitly");
+    assert!(
+        !err.contains("does not exist"),
+        "an invalid shape must not be reported as a missing parent: {err}"
+    );
+}
+
+/// `capabilities.reasoning` must follow the same create-on-Set rule as `limit`,
+/// so one dialog does not accept one field and refuse its neighbour.
+#[test]
+fn capabilities_reasoning_is_creatable_and_removal_stays_strict() {
+    let source = b"{\n  \"providers\": {\n    \"acme\": {\n      \"package\": \"@opencode/ai/providers/openai-compatible\",\n      \"models\": {\n        \"bare\": { \"modelID\": \"upstream/bare\" }\n      }\n    }\n  }\n}\n";
+    let (_dir, path) = write_config("bare-capabilities.jsonc", source);
+    let before = read_document(&path).expect("read");
+    let prepared = prepare_changes(
+        &path,
+        &before.hash,
+        &[edit_set(
+            &[
+                "providers",
+                "acme",
+                "models",
+                "bare",
+                "capabilities",
+                "reasoning",
+            ],
+            json!({ "supported": true, "effort": ["high"] }),
+        )],
+    )
+    .expect("creating capabilities.reasoning on a model without it must be allowed");
+    commit_changes(&prepared).expect("commit capabilities");
+    let text = fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("\"capabilities\": {"),
+        "capabilities block created: {text}"
+    );
+    assert!(
+        text.contains("\"supported\": true"),
+        "reasoning written: {text}"
+    );
+
+    let after = read_document(&path).expect("read after");
+    let err = prepare_changes(
+        &path,
+        &after.hash,
+        &[edit_remove(&[
+            "providers",
+            "acme",
+            "models",
+            "bare",
+            "capabilities",
+            "reasoning",
+        ])],
+    )
+    .expect("removing a present reasoning leaf is allowed");
+    commit_changes(&err).expect("commit removal");
+}
+
 #[test]
 fn model_and_provider_creation_are_scaffolded_safely() {
     let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\"\n    }\n  }\n}\n";

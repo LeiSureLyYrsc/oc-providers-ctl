@@ -2096,11 +2096,20 @@ fn validate_model_field_edit(
             if let Some(value) = edit.value.as_ref() {
                 validate_limit_number(value)?;
             }
-            validate_leaf_exists(model_obj.get_object("limit"), leaf)?;
+            if edit.op == EditOp::Remove {
+                validate_leaf_exists(model_obj.get_object("limit"), leaf)?;
+            } else {
+                validate_creatable_block(model_obj.get("limit"), "limit")?;
+            }
             Ok(())
         } else if field == "capabilities" && leaf == "reasoning" && dialect == Dialect::V2 {
             if let Some(value) = edit.value.as_ref() {
                 validate_v2_reasoning(value)?;
+            }
+            if edit.op == EditOp::Remove {
+                validate_leaf_exists(model_obj.get_object("capabilities"), leaf)?;
+            } else {
+                validate_creatable_block(model_obj.get("capabilities"), "capabilities")?;
             }
             Ok(())
         } else {
@@ -2170,6 +2179,19 @@ fn validate_leaf_exists(parent: Option<&JObject>, key: &str) -> Result<(), Strin
         return Err("The requested leaf field does not exist.".to_string());
     }
     Ok(())
+}
+
+/// A `Set` on a leaf whose parent block is absent is allowed: the write path
+/// scaffolds missing intermediate objects for supported creation paths. An
+/// absent parent and a parent of the wrong shape stay separate outcomes -- only
+/// the former is creatable, the latter is a malformed file that must be refused
+/// rather than silently replaced.
+fn validate_creatable_block(parent: Option<&JObjectProp>, label: &str) -> Result<(), String> {
+    match parent {
+        None => Ok(()),
+        Some(prop) if prop.value.as_object().is_some() => Ok(()),
+        Some(_) => Err(format!("The `{label}` field must be an object.")),
+    }
 }
 
 fn validate_default_model_string(value: &str) -> Result<(), String> {
