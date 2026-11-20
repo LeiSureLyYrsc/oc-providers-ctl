@@ -67,7 +67,22 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
     let (endpoint, protocol) = resolve_models_endpoint(&settings)?;
 
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let api_key = resolve_api_key(&settings, config_dir)?;
+
+    // Skip the key resolution when the request already carries a credential of
+    // its own. Without this a broken `apiKey` reference (an unset environment
+    // variable, a missing file) aborts a request whose explicit `x-api-key` is
+    // perfectly usable -- the key is never sent, but its resolution still fails.
+    //
+    // Limited to the Anthropic protocols: for other providers the resolved key
+    // also feeds the existing "sent without authentication" warning, and
+    // changing that is a separate decision.
+    let explicit_credential =
+        protocol.is_anthropic() && has_explicit_credential_header(&settings.headers);
+    let api_key = if explicit_credential {
+        None
+    } else {
+        resolve_api_key(&settings, config_dir)?
+    };
     let configured_headers = with_protocol_default_headers(protocol, settings.headers.clone());
     let headers = prepare_headers(&configured_headers, api_key.as_deref(), config_dir)?;
 
@@ -149,7 +164,7 @@ pub async fn fetch_inventory(path: &Path, provider_id: &str) -> Result<ProviderI
     if model_ids.is_empty() {
         warnings.push("Provider returned no model IDs.".to_string());
     }
-    if !settings.env_names.is_empty() && api_key.is_none() {
+    if !settings.env_names.is_empty() && api_key.is_none() && !explicit_credential {
         warnings.push(
             "No configured environment credential was available; the request was sent without authentication."
                 .to_string(),
@@ -422,13 +437,20 @@ fn resolve_models_endpoint(settings: &ProviderSettings) -> Result<(Url, OpenAiPr
         })?
     } else {
         // Built-in providers whose protocol and default endpoint are known.
+        // An explicitly declared package always wins over this guess: a
+        // provider keyed `anthropic` that points at a compatible gateway must
+        // be described by its package, not inferred from its name.
         match settings.provider_id.as_str() {
             "openai" => OpenAiProtocol::OpenAi,
             "openrouter" => OpenAiProtocol::OpenRouter,
             "xai" => OpenAiProtocol::XAi,
+            // An `anthropic` entry that omits `package` is the common shape in
+            // OpenCode configuration. It addresses the official API, which is
+            // the default endpoint this protocol resolves to.
+            "anthropic" => OpenAiProtocol::Anthropic,
             _ => {
                 return Err(format!(
-                    "Provider '{}' does not declare an OpenAI-compatible package, so its model-list protocol is unknown. Add an official OpenAI-compatible `package`/`npm` setting or list models manually; no model-list request was made.",
+                    "Provider '{}' does not declare a supported package, so its model-list protocol is unknown. Add an official OpenAI or Anthropic `package`/`npm` setting or list models manually; no model-list request was made.",
                     safe_label(&settings.provider_id)
                 ));
             }
@@ -616,6 +638,20 @@ fn resolve_api_key(
 /// provider key as `Authorization: Bearer` **in addition** to one of these
 /// makes the request carry two credentials at once.
 const ALTERNATIVE_CREDENTIAL_HEADERS: &[&str] = &["x-api-key", "api-key"];
+
+/// Whether the caller already supplies a credential header, either as
+/// `Authorization` or as one of the alternative credential headers. When true,
+/// no generated `Authorization: Bearer` is added and the provider key does not
+/// need to be resolved at all.
+fn has_explicit_credential_header(configured: &[(String, String)]) -> bool {
+    configured.iter().any(|(name, _)| {
+        let name = name.trim();
+        name.eq_ignore_ascii_case("authorization")
+            || ALTERNATIVE_CREDENTIAL_HEADERS
+                .iter()
+                .any(|alternative| name.eq_ignore_ascii_case(alternative))
+    })
+}
 
 fn prepare_headers(
     configured: &[(String, String)],
