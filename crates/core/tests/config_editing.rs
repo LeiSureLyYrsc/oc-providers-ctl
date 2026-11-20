@@ -885,9 +885,15 @@ fn a_batch_can_create_two_limit_leaves_in_either_order() {
         let source = b"{\n  \"provider\": {\n    \"acme\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"models\": {\n        \"bare\": { \"name\": \"Bare\" }\n      }\n    }\n  }\n}\n";
         let (_dir, path) = write_config("batch-limit.jsonc", source);
         let before = read_document(&path).expect("read");
+        // Pin each value to its leaf name, not to its position in the batch:
+        // the point of the test is that order does not matter.
+        let value_for = |leaf: &str| match leaf {
+            "context" => json!(64000),
+            _ => json!(2048),
+        };
         let edits = vec![
-            edit_set(&paths[0], json!(64000)),
-            edit_set(&paths[1], json!(2048)),
+            edit_set(&paths[0], value_for(paths[0][5])),
+            edit_set(&paths[1], value_for(paths[1][5])),
         ];
         let prepared = prepare_changes(&path, &before.hash, &edits).expect("batch create limit");
         commit_changes(&prepared).expect("commit batch");
