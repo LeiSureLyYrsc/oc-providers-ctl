@@ -389,10 +389,8 @@ Fix the listed field(s) before editing this file.
 > 判据才可维护。** 反例：`validate_edit_batch` 里那条「一次 `set` 编辑必须带值」同样带反引号，
 > 却在 `prepare_changes` 的逐条校验里先于任何字段判断执行——它是所有编辑请求都会过的第一关。
 
-> **`{…}` 或 `<…>` 表示可变部分，当前脚本跳过含占位符的条目。** 它不一定是 Rust 模板原文——
-> 也可能只是本页对一条长消息的缩写。所以核对这些条目要按可变部分的形式搜，
-> 搜实例化后的完整字符串找不到是正常的。**这是脚本当前的能力边界，不是这类消息无法核对**：
-> 把两侧的占位符归一化之后是可以比对的，只是脚本还没有做这一步。
+> **`{…}` 或 `<…>` 表示可变部分。** 四条带 `<!-- verify:<id> -->` 标记的摘录与 Rust 源码使用相同占位符，
+> 脚本逐字核对。其余被脚本识别的含占位符引用列在 `NOT CHECKED` 中，按源码模板核对。维护标记时，请把它紧跟在同一表格单元格内的代码段后。
 >
 > **措辞不是契约。** 上表「可达 / 不可达」是按 `main` 某个提交的调用链得出的结论。
 > 若实现改了某条消息的措辞，**本表仍会原样显示，但结论已经失效**，而且看起来依然权威。
@@ -415,9 +413,9 @@ Fix the listed field(s) before editing this file.
 | `The target object could not be located safely.` / `The target object range is not safe to edit.` | 要改的那段在文件里的位置无法安全定位（格式太特殊）。调整文件格式或手工编辑。 |
 | ``The provider `<key>` field has an invalid shape.`` | 该字段存在但类型不对。**这句从编辑入口不可达**：该字段类型错会先触字段级门禁（见上）。处置：改源文件。 |
 | `The model identifier is empty or too long.` | 模型键名为空或过长（上限 256 字符）。 |
-| `The {label} identifier is empty or too long.` | 同上，`{label}` 会是 `provider` 或 `model`。 |
-| `The {label} identifier contains control characters.` | ID 里有控制字符。 |
-| `The {label} identifier contains a reserved character.` | ID 里用了保留字符（`/` 等分隔用途的字符）。 |
+| `The {label} identifier is empty or too long.` <!-- verify:label-empty-or-too-long --> | 同上，`{label}` 会是 `provider` 或 `model`。 |
+| `The {label} identifier contains control characters.` <!-- verify:label-control-chars --> | ID 里有控制字符。 |
+| `The {label} identifier contains a reserved character.` <!-- verify:label-reserved-char --> | ID 里用了保留字符（`/` 等分隔用途的字符）。 |
 | `The model identifier contains control characters.` | 模型键名里有控制字符。 |
 ### 类别 D — 值本身不合法
 
@@ -586,7 +584,7 @@ Fix the listed field(s) before editing this file.
 | `The configured credential file is empty.` / `...is not a small regular file.` / `...is too large to use safely.` | 凭证文件为空或不是小的普通文件。 |
 | `The configured credential reference is malformed.` / `...has an invalid environment variable name.` / `...resolved to an empty value.` / `The configured environment credential reference is not set.` | 凭证引用的写法或解析结果有问题。检查 `{env:NAME}` 的变量名，以及启动进程的环境里是否真的设了它。 |
 | `Ignored {n} provider entries that did not contain a usable model ID.` | **不是错误**，是信息：部分返回项缺可用 ID 被跳过。 |
-| `Provider returned more than {MAX_MODELS} model IDs; the inventory was truncated.` | 返回项超过上限（10000）被截断。 |
+| `Provider returned more than {MAX_MODELS} model IDs; the inventory was truncated.` <!-- verify:max-models-truncated --> | 返回项超过上限（10000）被截断。 |
 
 > **上表里 `Provider returned HTTP {status} {reason}.` 那一行，说的是「没配凭据时看到的状态码」。**
 >
