@@ -235,13 +235,13 @@ V2 的思考能力是**对象**，不是布尔值：
 | --- | --- |
 | `That provider field cannot be edited in this version.` | 查第一节/第二节的供应商层表。常见原因：在 V2 里用了 `npm`，或在 V1 里用了 `package`。 |
 | `That model field cannot be edited in this version.` | 查模型层表。常见原因：在 V1 里用 `capabilities`，或在 V2 里用布尔 `reasoning`。 |
-| `Only `options.baseURL` can be edited; credential and header options are protected.` | V1 的 `options` 下只开放 `baseURL`。凭证类不许在界面改。 |
-| `Only `settings.baseURL` can be edited; credential and header settings are protected.` | 同上，V2 的写法。 |
+| ``Only `options.baseURL` can be edited; credential and header options are protected.`` | V1 的 `options` 下只开放 `baseURL`。凭证类不许在界面改。 |
+| ``Only `settings.baseURL` can be edited; credential and header settings are protected.`` | 同上，V2 的写法。 |
 | `That model field cannot be edited.` | 完全不在白名单里的字段。 |
 | `Replace this field through its leaf paths instead.` | 你试图整体改 `limit` 或 `capabilities`。改成具体叶子路径。 |
-| `Unsupported limit field `<key>`.` | `limit` 下只认 `context` / `input` / `output`。 |
-| `Unsupported capabilities.reasoning field `<key>`.` | `reasoning` 下只认 `supported` / `toggle` / `effort` / `budget`。 |
-| `Only `capabilities.reasoning` may be added in this version.` | `capabilities` 下其它字段不能新增。 |
+| ``Unsupported limit field `<key>`.`` | `limit` 下只认 `context` / `input` / `output`。 |
+| ``Unsupported capabilities.reasoning field `<key>`.`` | `reasoning` 下只认 `supported` / `toggle` / `effort` / `budget`。 |
+| ``Only `capabilities.reasoning` may be added in this version.`` | `capabilities` 下其它字段不能新增。 |
 | `V1 model reasoning must be a boolean.` / `V1 reasoning must be a boolean.` | V1 的思考能力只能是 `true`/`false`，不能是对象。 |
 | `The existing provider dialect does not match this edit path.` | 供应商条目实际是 V2，你却用 `provider.` 路径改它（或反之）。路径前缀要和条目方言一致。 |
 
@@ -390,7 +390,9 @@ Fix the listed field(s) before editing this file.
 > 却在 `prepare_changes` 的逐条校验里先于任何字段判断执行——它是所有编辑请求都会过的第一关。
 
 > **`{…}` 或 `<…>` 表示可变部分。** 四条带 `<!-- verify:<id> -->` 标记的摘录与 Rust 源码使用相同占位符，
-> 脚本逐字核对。其余被脚本识别的含占位符引用列在 `NOT CHECKED` 中，按源码模板核对。维护标记时，请把它紧跟在同一表格单元格内的代码段后。
+> 脚本逐字核对，**且每次运行都会把「ID → 当前绑定的原文」成对打出来供人工核对**——脚本不保证 ID 和
+> 句子的对应关系（互换两个标记仍会通过）。其余含占位符的引用按**归一化**校验：文档写 `{id}`、源码写 `{}`
+> 或 `{provider_label}` 视为同一个，周围的词仍逐字比对。维护标记时，请把它紧跟在同一表格单元格内的代码段后。
 >
 > **措辞不是契约。** 上表「可达 / 不可达」是按 `main` 某个提交的调用链得出的结论。
 > 若实现改了某条消息的措辞，**本表仍会原样显示，但结论已经失效**，而且看起来依然权威。
@@ -423,7 +425,7 @@ Fix the listed field(s) before editing this file.
 | --- | --- |
 | `Limit values must be non-negative integers.` | 上限值必须是 ≥ 0 的整数。 |
 | `The default model must be a string.` | 默认模型是字符串，不是对象。 |
-| `The default model must use `provider/model` format.` | 写成 `provider/model`。 |
+| ``The default model must use `provider/model` format.`` | 写成 `provider/model`。 |
 | `The default model is empty or too long.` | 空或超过 512 字符。 |
 | `The default model cannot contain whitespace.` | 去掉空白。 |
 | `The default model contains control characters.` | 去掉控制字符。 |
@@ -448,14 +450,14 @@ Fix the listed field(s) before editing this file.
 | `Field `<key>` cannot be added to a new provider in this version.` | 创建供应商时只允许 `name` / `npm` / `api` / `options` / `models`（V1）或 `name` / `package` / `settings` / `models`（V2）。 |
 | `capabilities.reasoning.effort labels must be unique.` | 思考档位有重复项。 |
 | `capabilities.reasoning with supported:false cannot include toggle, effort or budget.` | `supported: false` 时只能有这一个字段，删掉其它三项。 |
-| `V2 capabilities.reasoning requires a boolean `supported` field.` | `reasoning` 对象必须带布尔的 `supported`。 |
+| ``V2 capabilities.reasoning requires a boolean `supported` field.`` | `reasoning` 对象必须带布尔的 `supported`。 |
 | `V2 capabilities.reasoning must be an object.` | V2 的 `reasoning` 是对象，不是布尔值。 |
 | `capabilities.reasoning.effort must be an array of strings.` / `...effort entries must be strings.` | 档位是字符串数组。 |
 | `capabilities.reasoning.effort may contain at most 32 entries.` | 档位最多 32 个。 |
 | `capabilities.reasoning.budget must be an object.` | `budget` 是对象。 |
 | `capabilities.reasoning.budget.min cannot exceed budget.max.` | 把 `min` 调小或 `max` 调大。 |
 | `capabilities.reasoning.budget values must be safe integers.` / `...values exceed the safe integer range.` | 预算值必须是安全整数范围内的整数。 |
-| `Unsupported capabilities.reasoning.budget field `<key>`.` | `budget` 下只认 `min` / `max`。 |
+| ``Unsupported capabilities.reasoning.budget field `<key>`.`` | `budget` 下只认 `min` / `max`。 |
 | `capabilities.reasoning.toggle must be a boolean.` | `toggle` 必须是布尔值。 |
 | `A reasoning effort label is empty or too long.` | 档位名不能为空或超过 64 字符。 |
 | `V2 variant ids must be unique.` | 变体的 `id` 不能重复。 |
@@ -573,8 +575,8 @@ Fix the listed field(s) before editing this file.
 | `Provider ID is required.` | 内部调用缺供应商 ID。 |
 | `Provider '{id}' was not found in this configuration file.` | 该供应商不在当前文件里。 |
 | `Provider '{id}' is not an object in this configuration file.` | 该供应商条目不是对象，源文件需人工修正。 |
-| `Provider '{id}' is defined in both `provider` and `providers`; refusing an ambiguous inventory request.` | 同一 ID 在两种方言里都定义了。先消除重复。 |
-| `Provider '{id}' has an unsupported `env` credential list.` | `env` 写法不合法。 |
+| ``Provider '{id}' is defined in both `provider` and `providers`; refusing an ambiguous inventory request.`` | 同一 ID 在两种方言里都定义了。先消除重复。 |
+| ``Provider '{id}' has an unsupported `env` credential list.`` | `env` 写法不合法。 |
 | `Provider '{id}' has an unsupported HTTP headers value.` | headers 写法不合法。 |
 | `Configured HTTP header '{name}' is not allowed for provider inventory.` | 某些 header 被禁（会改变认证语义的）。 |
 | `Configured HTTP headers must have string values.` | headers 的值必须是字符串。 |
