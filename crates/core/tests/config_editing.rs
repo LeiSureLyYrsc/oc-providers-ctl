@@ -1138,7 +1138,21 @@ fn wrong_typed_limit_leaves_make_source_read_only() {
         &[edit_set(&["model"], json!("bad-limit/m"))],
     )
     .expect_err("bad limit edit");
-    assert!(err.contains("unsafe"), "{err}");
+    // The refusal must name the wrong-typed leaf and say what it should be. It
+    // must not call this a syntax mixture: `context` is a string here, not V1
+    // syntax, and the file uses only V2.
+    assert!(
+        err.contains("`providers.bad-limit.models.m.limit.context`"),
+        "the refusal must name the wrong-typed leaf: {err}"
+    );
+    assert!(
+        err.contains("must be a non-negative integer"),
+        "the refusal must say what the leaf should be: {err}"
+    );
+    assert!(
+        !err.contains("mixture") && !err.contains("mixes"),
+        "a wrong-typed leaf is not a V1/V2 mixture: {err}"
+    );
 
     let negative = b"{\n  \"provider\": {\n    \"neg\": {\n      \"npm\": \"pkg\",\n      \"models\": {\n        \"m\": { \"limit\": { \"context\": -1 } }\n      }\n    }\n  }\n}\n";
     let (_dir2, path2) = write_config("neg-limit.jsonc", negative);
@@ -1158,7 +1172,16 @@ fn malformed_v2_reasoning_makes_source_read_only() {
         &[edit_set(&["model"], json!("bad-reasoning/m"))],
     )
     .expect_err("bad reasoning edit");
-    assert!(err.contains("unsafe"), "{err}");
+    // A malformed `capabilities.reasoning` is a shape error in a V2-only file,
+    // so the refusal must point at it and must not claim a V1/V2 mixture.
+    assert!(
+        err.contains("`providers.bad-reasoning.models.m.capabilities.reasoning`"),
+        "the refusal must name the malformed reasoning block: {err}"
+    );
+    assert!(
+        !err.contains("mixture") && !err.contains("mixes"),
+        "a malformed reasoning block is not a V1/V2 mixture: {err}"
+    );
 
     // Unknown provider-level keys stay preserved and must not make the file
     // read-only or break edits.
