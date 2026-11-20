@@ -2096,7 +2096,7 @@ fn validate_model_field_edit(
             if let Some(value) = edit.value.as_ref() {
                 validate_limit_number(value)?;
             }
-            if edit.op == EditOp::Remove {
+            if true {
                 validate_leaf_exists(model_obj.get_object("limit"), leaf)?;
             } else {
                 validate_creatable_block(model_obj.get("limit"), || {

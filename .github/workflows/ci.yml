@@ -68,7 +68,7 @@ jobs:
         run: cargo clippy -p oc-providers-core --all-targets --locked -- -D warnings
 
       - name: Tests (core only)
-        run: cargo test -p oc-providers-core --locked
+        run: cargo test -p oc-providers-core --locked --no-fail-fast
 
   desktop-check:
     name: Desktop check / ${{ matrix.name }}
@@ -125,7 +125,7 @@ jobs:
       - name: Windows core and backup ACL tests
         if: runner.os == 'Windows'
         timeout-minutes: 10
-        run: cargo test -p oc-providers-core --locked
+        run: cargo test -p oc-providers-core --locked --no-fail-fast
 
       - name: Shell unit tests (state authorization and preview lifecycle)
         run: cargo test -p oc-providers-ctl --lib --locked
