@@ -18,6 +18,16 @@
 #             separate them.
 #   DOES NOT: prove a required excerpt's fixed id is bound to the right sentence.
 #             Swapping two markers passes -- both sentences are real source strings.
+#   DOES NOT: apply the message-boundary rule to excerpts without a placeholder. Those
+#             are compared as verbatim substrings, so text added before or after them in
+#             the source goes unnoticed. Only placeholder-bearing excerpts get the
+#             boundary test, because a placeholder is what made their spelling ambiguous.
+#             State it here because a protection that covers only some excerpts, with
+#             no stated range, reads as covering all of them.
+#   DOES NOT: follow `concat!`. It requires the quoted sentence to exist as a complete
+#             quoted literal. Prefix spliced in as its own literal (`concat!("Note: ",
+#             "Provider...")`) passes while the final message differs; the same prefix
+#             written inside that one literal fails.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
