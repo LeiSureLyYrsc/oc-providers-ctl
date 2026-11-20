@@ -42,6 +42,7 @@ $sourceFiles = @(
 
 if (-not $sourceFiles) { Write-Error "No source files found under $repo"; exit 1 }
 
+$script:SkippedLiterals = New-Object System.Collections.ArrayList
 function Get-QuotedErrorLiterals {
     param($Docs)
     # Only error-MESSAGE-shaped literals are collected: a capitalised sentence ending
@@ -56,7 +57,7 @@ function Get-QuotedErrorLiterals {
             if ($literal -notmatch '\s') { continue }
             # Skip placeholders: the source has format!() templates, so {..} and <..>
             # never match verbatim. Those are checked by eye in the doc instead.
-            if ($literal -match '<|\{|\}') { continue }
+            if ($literal -match '<|\{|\}') { [void]$script:SkippedLiterals.Add($literal); continue }
             [pscustomobject]@{ Doc = $doc.Name; Literal = $literal }
         }
     }
@@ -103,7 +104,19 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-Write-Output "OK - every quoted literal exists verbatim in the Rust source."
+Write-Output "OK - every checked literal exists verbatim in the Rust source."
+
+# Literals containing placeholders ({id}, {status}, ...) are skipped on purpose: the source has
+# format!() templates and the doc writes the readable form with braces, so the two can never be
+# equal. They are NOT covered by this script. Say so out loud: a green run must not imply full
+# coverage, because the skipped ones are exactly where a rewritten message goes unnoticed.
+$skipped = @($script:SkippedLiterals)
+if ($skipped.Count -gt 0) {
+    Write-Output ""
+    Write-Output "NOT CHECKED - $($skipped.Count) literal(s) contain placeholders and were skipped;"
+    Write-Output "these are verified by eye only, not by this script:"
+    $skipped | Sort-Object -Unique | ForEach-Object { Write-Output ("  " + $_) }
+}
 Write-Output "Reminder: this proves no drift in wording only. It does NOT prove the surrounding advice,"
 Write-Output "or which code path raises a message, or how many paths do. Those need spot-checking"
 Write-Output "against the throw sites on the branch you are documenting."
