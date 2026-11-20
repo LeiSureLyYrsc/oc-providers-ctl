@@ -128,13 +128,107 @@ function ConvertTo-NormalisedText {
     return $s
 }
 
-# Normalised comparison. The plain substring check (Test-LiteralPresent) is still
-# used for excerpts with no placeholder, so the common case stays exact and cheap.
+# Does `$Needle` start a real message in the (already normalised) source, without being
+# the whole message? "Starts" = sits right after a `"` or a newline.
+#
+# Called ONLY for excerpts that do not end with a period. For those, a SPACE after the
+# match means the source sentence keeps going -- that is what a truncated excerpt looks
+# like (`...so its` + ` model-list protocol...`). The space must therefore count as
+# "continues" here. It is the opposite of the rule in Test-LiteralPresentNormalised,
+# where a trailing space is what makes a legitimate first-sentence quote valid, and the
+# two rules differ because the excerpt's own last character differs.
+#
+# A path or a character class will not satisfy this: it does not sit at the start of a
+# message at all.
+function Test-LiteralStartsMessage {
+    param([string]$Source, [string]$Needle)
+    $at = 0
+    while (($at = $Source.IndexOf($Needle, $at, [System.StringComparison]::Ordinal)) -ge 0) {
+        $before = if ($at -eq 0) { '' } else { $Source.Substring($at - 1, 1) }
+        $endAt = $at + $Needle.Length
+        $after = if ($endAt -ge $Source.Length) { '' } else { $Source.Substring($endAt, 1) }
+        $starts = ($before -eq '"') -or ($before -eq "`n")
+        $continues = ($after -ne '"') -and ($after -ne "`n") -and ($after -ne '')
+        if ($starts -and $continues) { return $true }
+        $at++
+    }
+    return $false
+}
+
+# Normalised comparison with MESSAGE BOUNDARIES.
+#
+# A bare substring test is too weak once normalisation is in place. Three shapes pass
+# a substring test that should not:
+#
+#   1. source says `Lookup failed: Provider '{id}' was not found...` -- the doc excerpt
+#      is in there, but it is not a message on its own; the user also sees the prefix.
+#   2. source says `...configuration file..extra` -- the doc's trailing period matched
+#      the first of two periods.
+#   3. the doc excerpt is missing its final period, or stops mid-sentence at `so its`
+#      -- a substring that ends early is always present in its own continuation.
+#
+# So a hit only counts when the excerpt STARTS a message and ENDS one. What counts:
+#   start: immediately after `"` (the opening quote of the Rust literal) or a newline.
+#   end:   a `"`, a newline, end of source, or a SPACE.
+#
+# The space is load-bearing and is why this is not simply "quoted on both sides".
+# Several messages here open with one sentence and then continue -- "...protocol is
+# unknown. Add an official OpenAI or Anthropic `package`/`npm` setting...". A doc may
+# rightly quote only the first sentence, which ends at a period followed by a space.
+# Requiring the quote would reject those and force docs to carry advice they don't
+# need. Normalisation has already collapsed placeholders, so `"` here is the source's
+# own quote character, not a backtick.
 function Test-LiteralPresentNormalised {
     param([string]$Source, [string]$Literal)
     $needle = ConvertTo-NormalisedText -Text $Literal
     $hay = ConvertTo-NormalisedText -Text $Source
-    return $hay.IndexOf($needle, [System.StringComparison]::Ordinal) -ge 0
+    $at = 0
+    while (($at = $hay.IndexOf($needle, $at, [System.StringComparison]::Ordinal)) -ge 0) {
+        $before = if ($at -eq 0) { '' } else { $hay.Substring($at - 1, 1) }
+        $endAt = $at + $needle.Length
+        $after = if ($endAt -ge $hay.Length) { '' } else { $hay.Substring($endAt, 1) }
+        $startsMessage = ($before -eq '"') -or ($before -eq "`n")
+        $endsMessage = ($after -eq '"') -or ($after -eq "`n") -or ($after -eq '') -or ($after -eq ' ')
+        if ($startsMessage -and $endsMessage) { return $true }
+        $at++
+    }
+    return $false
+}
+
+# A doc excerpt that is a truncated or de-punctuated ERROR MESSAGE must fail, not vanish.
+# The collector above requires a trailing period, so without this the three ways to
+# wreck an excerpt -- delete its period, cut it mid-sentence, or paste it behind another
+# message -- all end with "never collected, therefore never checked, therefore green".
+#
+# The hard part is telling a BROKEN MESSAGE from a legitimate non-message quote: docs
+# also quote paths, field names and code snippets inline, and those must not be dragged
+# in. A shape test cannot do it (`A-Z a-z 0-9 _ - / : @` looks like nothing and IS
+# legitimate). So the test is a fact about the SOURCE, not about the quote:
+#
+#   an excerpt without a trailing period fails only when it matches the BEGINNING of a
+#   real source message and is not the whole of it.
+#
+# That is precise in both directions. A truncated message or a de-punctuated one does
+# start a real message. A path or a character class does not, so it is left alone
+# instead of being forced into an error-message check it never belonged to.
+function Get-SuspiciousErrorFragments {
+    param($Docs, [string]$NormSource)
+    # Fence width matched, as above, so a single-backtick span cannot close on an inner one.
+    $pattern = '(?<fence>`+)(?<lit>[A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?)\k<fence>'
+    foreach ($doc in $Docs) {
+        $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
+        foreach ($m in [regex]::Matches($text, $pattern)) {
+            $fragment = $m.Groups['lit'].Value.Trim()
+            if ($fragment -notmatch '\s') { continue }
+            if ($fragment.EndsWith('.')) { continue }
+            if ($fragment -match '\s\.\.\.$') { continue }
+            $needle = ConvertTo-NormalisedText -Text $fragment
+            if (Test-LiteralStartsMessage -Source $NormSource -Needle $needle) {
+                $lineNo = ($text.Substring(0, $m.Index) -split "`n").Count
+                [pscustomobject]@{ Doc = $doc.Name; Literal = $fragment; Line = $lineNo }
+            }
+        }
+    }
 }
 
 $script:SkippedLiterals = New-Object System.Collections.ArrayList
@@ -164,7 +258,16 @@ function Get-QuotedErrorLiterals {
     # bridging prose. **If someone adds a message containing `|` or Chinese text, it
     # becomes INVISIBLE again -- the same silent failure as the nested-backtick bug.**
     # Re-check this class when the docs gain a message of that shape.
-    $pattern = '`([A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?\.)`'
+    # The fence must be WIDTH-MATCHED: an opener and its closer have the same number
+    # of backticks. A message that quotes a field name needs a double-backtick span;
+    # written with single backticks it would otherwise close on the INNER one.
+    #
+    # The trailing period is required HERE because it is what separates an error message
+    # from the paths, field names and code snippets docs also quote inline. Dropping it
+    # used to be a silent escape: delete the period and the span stops matching, so the
+    # excerpt is never collected and the run stays green. Get-QuotedErrorLiterals still
+    # looks for those separately (see below) and fails when one is a truncated message.
+    $pattern = '(?<fence>`+)(?<lit>[A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?\.)\k<fence>'
     foreach ($doc in $Docs) {
         $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
         $requiredInDoc = @($RequiredLiterals | Where-Object Doc -CEQ $doc.Name | ForEach-Object Literal)
@@ -173,10 +276,10 @@ function Get-QuotedErrorLiterals {
             # that names the file and line can be acted on, one that only quotes the
             # text leaves the reader searching.
             $lineNo = ($text.Substring(0, $m.Index) -split "`n").Count
-            # Group 1 already excludes the surrounding backticks.
+            # The fence group replaces group 1 now that the pattern is fence-aware.
             # A message that quotes a field name, like "A `remove` edit ...", keeps
             # its inner backticks. In Markdown, wrap it in a double-backtick span.
-            $literal = $m.Groups[1].Value.Trim()
+            $literal = $m.Groups['lit'].Value.Trim()
             # An error message has whitespace; identifiers and paths do not.
             if ($literal -notmatch '\s') { continue }
             if ($requiredInDoc -ccontains $literal) { continue }
@@ -283,6 +386,13 @@ if ($requiredLiterals.Count -ne $requiredIds.Count) {
 $literals = $requiredLiterals + @(Get-QuotedErrorLiterals -Docs $docs -RequiredLiterals $requiredLiterals)
 $missing = @()
 
+# Excerpts that look like a damaged message: no trailing period, and they start a real
+# source message without being the whole of it. Reported as failures alongside the
+# ordinary misses, because "the check silently stopped seeing this" is the failure mode
+# they were created by.
+$normSource = ConvertTo-NormalisedText -Text $source
+$suspicious = @(Get-SuspiciousErrorFragments -Docs $docs -NormSource $normSource)
+
 foreach ($item in $literals) {
     # The required excerpts are complete Rust string literals, pinned verbatim.
     if ($item.Id) {
@@ -307,12 +417,22 @@ $occurrences = $literals.Count
 $distinct = @($literals | ForEach-Object { $_.Literal } | Sort-Object -Unique).Count
 Write-Output "Checked $occurrences excerpt occurrence(s) ($distinct distinct) across $($docs.Count) doc file(s), including $($requiredLiterals.Count) required excerpts."
 
-if ($missing.Count -gt 0) {
+if ($missing.Count -gt 0 -or $suspicious.Count -gt 0) {
     Write-Output ""
-    Write-Output "UNVERIFIED - these are quoted in docs but absent from source:"
-    foreach ($item in $missing) {
-        $location = if ($item.Id) { "$($item.Doc):$($item.Id)" } else { "$($item.Doc):$($item.Line)" }
-        Write-Output ("  [{0}] {1}" -f $location, $item.Literal)
+    if ($missing.Count -gt 0) {
+        Write-Output "UNVERIFIED - these are quoted in docs but absent from source:"
+        foreach ($item in $missing) {
+            $location = if ($item.Id) { "$($item.Doc):$($item.Id)" } else { "$($item.Doc):$($item.Line)" }
+            Write-Output ("  [{0}] {1}" -f $location, $item.Literal)
+        }
+    }
+    if ($suspicious.Count -gt 0) {
+        if ($missing.Count -gt 0) { Write-Output "" }
+        Write-Output "TRUNCATED - these quote the start of a real message but not all of it:"
+        foreach ($item in $suspicious) {
+            Write-Output ("  [{0}:{1}] {2}" -f $item.Doc, $item.Line, $item.Literal)
+        }
+        Write-Output "Restore the missing ending, or quote the whole sentence."
     }
     Write-Output ""
     Write-Output "Either the doc quotes it inaccurately, or the source string changed and the doc must follow."
