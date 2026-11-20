@@ -11,6 +11,13 @@
 #             the advice next to it is right. A message can be raised from several
 #             places; this script cannot tell which one a user hit. Treat a green run
 #             as "no drift", never as "the guidance is correct".
+#   DOES NOT: prove the source stopped there. A message that gains another sentence
+#             inside the same literal is not caught: the doc's excerpt is still a
+#             prefix of a real message, which is what legitimately quoting a first
+#             sentence looks like. Those two are the same shape, and this check cannot
+#             separate them.
+#   DOES NOT: prove a required excerpt's fixed id is bound to the right sentence.
+#             Swapping two markers passes -- both sentences are real source strings.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
