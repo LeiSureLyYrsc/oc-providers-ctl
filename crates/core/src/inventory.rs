@@ -1007,7 +1007,9 @@ async fn read_capped_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{models_endpoint, parse_provider_url, plaintext_transport_warning};
+    use super::{
+        models_endpoint, object_has_more, parse_provider_url, plaintext_transport_warning,
+    };
 
     #[test]
     fn parse_accepts_https_and_remote_plain_http() {
@@ -1113,5 +1115,56 @@ mod tests {
         // Query secrets are refused before reaching this point, so a parser
         // rejection can never surface them through the warning.
         assert!(parse_provider_url("http://api.example.com/v1?token=leak").is_err());
+    }
+
+    /// Pins both halves of the truncation-signal contract.
+    ///
+    /// Documentation states which pagination keys are recognized and which are
+    /// silently ignored. That list is only useful if it cannot drift away from
+    /// the code without something failing, so both halves are asserted here:
+    /// a narrowing refactor breaks the first part, a widening one (for example
+    /// "teaching" it `nextPageToken`) breaks the second. Widening looks like an
+    /// improvement but would turn a documented silent truncation into a silent
+    /// over-claim of coverage, which is worse for the user than saying nothing.
+    #[test]
+    fn recognized_truncation_signals_are_exactly_the_documented_ones() {
+        fn has_more(json: &str) -> bool {
+            let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+            object_has_more(value.as_object().expect("object root"))
+        }
+
+        // Recognized: the two boolean flags.
+        assert!(has_more(r#"{"has_more":true}"#));
+        assert!(has_more(r#"{"pagination":{"has_more":true}}"#));
+
+        // Recognized: presence-and-not-null of a continuation marker.
+        for key in ["next", "next_page", "nextPage"] {
+            assert!(
+                has_more(&format!(r#"{{"{key}":"cursor-1"}}"#)),
+                "{key} must count as a truncation signal"
+            );
+            assert!(
+                !has_more(&format!(r#"{{"{key}":null}}"#)),
+                "a null {key} must not count as a truncation signal"
+            );
+        }
+
+        // Not recognized. These are the keys real providers use; if any of
+        // them starts being recognized, documentation claiming "silent
+        // truncation" for that provider becomes wrong and must be updated.
+        for key in ["nextPageToken", "next_page_token"] {
+            assert!(
+                !has_more(&format!(r#"{{"{key}":"cursor-1"}}"#)),
+                "{key} is documented as unrecognized; recognizing it requires a docs change"
+            );
+        }
+        assert!(
+            !has_more(r#"{"links":{"next":"https://example.com/page-2"}}"#),
+            "links.next is documented as unrecognized; recognizing it requires a docs change"
+        );
+
+        // A false flag must not be read as "more available".
+        assert!(!has_more(r#"{"has_more":false}"#));
+        assert!(!has_more(r#"{"pagination":{"has_more":false}}"#));
     }
 }
