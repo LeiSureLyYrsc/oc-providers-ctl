@@ -42,17 +42,56 @@ $sourceFiles = @(
 
 if (-not $sourceFiles) { Write-Error "No source files found under $repo"; exit 1 }
 
+
+# One comparison, used by both the self-test and the real check, so a green self-test
+# proves something about the check that actually runs.
+#
+# Case-sensitive on purpose: `-match`/`-notmatch` are case-INSENSITIVE by default in
+# PowerShell, so "the LIMIT field must be an object." used to pass against a source
+# string that says "The limit field must be an object.". A wording check that ignores
+# case is not checking the wording.
+#
+# SCOPE of this comparison: it answers "does this text appear anywhere in the source",
+# not "is this text an entire Rust string literal". A doc fragment with a trailing period
+# removed would still match its parent sentence. Making it exact would mean parsing Rust
+# string literals (format!, escapes, multi-line concatenation) -- a different job. The
+# README states this limit rather than implying the checker is exact.
+function Test-LiteralPresent {
+    param([string]$Source, [string]$Literal)
+    return $Source.IndexOf($Literal, [System.StringComparison]::Ordinal) -ge 0
+}
 $script:SkippedLiterals = New-Object System.Collections.ArrayList
 function Get-QuotedErrorLiterals {
     param($Docs)
     # Only error-MESSAGE-shaped literals are collected: a capitalised sentence ending
     # in a period. That deliberately excludes paths, env vars, identifiers and code
     # snippets, which other docs legitimately quote without being error strings.
-    $pattern = '`([A-Z][^`]{12,200}\.)`'
+    #
+    # The body class used to be `[^`]`, which forbade a backtick INSIDE the literal.
+    # That silently excluded every error message that quotes a field name in backticks
+    # (for example the "field must be an object" pair). They were not reported as
+    # skipped either: they never reached the collector at all, so the run still read
+    # as full coverage. `.{12,200}?` (lazy) admits them.
+    #
+    # Two guards keep the widened class from matching prose that merely spans a pair
+    # of backticks:
+    #   - no newline  : a literal lives on one line; without this, lazy matching
+    #                   bridges two unrelated sentences across a line break.
+    #   - no CJK      : the surrounding documentation is Chinese, the Rust error
+    #                   strings are not, so a CJK character inside the span means we
+    #                   caught prose rather than a message. `|` is excluded for the
+    #                   same reason: it is table syntax, not message text.
+    $pattern = '`([A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?\.)`'
     foreach ($doc in $Docs) {
         $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
         foreach ($m in [regex]::Matches($text, $pattern)) {
-            $literal = ($m.Groups[1].Value -replace '`', '').Trim()
+            # Group 1 already excludes the surrounding backticks.
+            # A message that quotes a field name, like "A `remove` edit ...", keeps
+            # its INNER backticks: stripping them made the comparison impossible.
+            # Markdown escaping: such a literal is written as \` in the doc so the
+            # code span renders, while the source has a bare backtick. Undo the
+            # escape before comparing; an already-bare backtick is left alone.
+            $literal = ($m.Groups[1].Value -replace '\\`', '`').Trim()
             # An error message has whitespace; identifiers and paths do not.
             if ($literal -notmatch '\s') { continue }
             # Skip placeholders: the source has format!() templates, so {..} and <..>
@@ -67,18 +106,31 @@ function Get-QuotedErrorLiterals {
 # A check that can only ever pass is not a check. Sentinel's point: without a
 # deliberate negative case, the next person sees a green run and never learns
 # whether it could have gone red. So we prove the matcher rejects an absent string
-# on every single run, using the same code path as the real check.
+# on every single run, using the same function as the real check.
+$selfTestSource = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
+
 $sentinel = 'This sentence is deliberately absent from the source tree.'
-if ([regex]::Escape($sentinel) -match [regex]::Escape('Actually this one is present.')) {
-    Write-Output "SELF-TEST FAILED: matcher reported a hit for an absent literal."
-    exit 1
-}
-$selfTestHit = (($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n") -match [regex]::Escape($sentinel)
-if ($selfTestHit) {
+if (Test-LiteralPresent -Source $selfTestSource -Literal $sentinel) {
     Write-Output "SELF-TEST FAILED: the sentinel literal unexpectedly exists in source; pick a new one."
     exit 1
 }
 Write-Output "Self-test OK: an absent literal is correctly reported as absent."
+
+# Second, independent negative case: the matcher must be case-SENSITIVE.
+# Without this, the case-insensitivity bug fixed above could silently return.
+# It uses a real sentence from the docs in a different case, so if a future
+# change ever made the comparison case-insensitive again, this goes red.
+$caseSource = 'Write-Output "The limit field must be an object."'
+$caseVariant = 'THE LIMIT FIELD MUST BE AN OBJECT.'
+if (Test-LiteralPresent -Source $caseSource -Literal $caseVariant) {
+    Write-Output "SELF-TEST FAILED: matcher accepted a case-only variant; it must compare case-sensitively."
+    exit 1
+}
+if (-not (Test-LiteralPresent -Source $caseSource -Literal 'The limit field must be an object.')) {
+    Write-Output "SELF-TEST FAILED: matcher rejected the exact literal; it must find identical text."
+    exit 1
+}
+Write-Output "Self-test OK: matching is case-sensitive and still finds exact text."
 
 # --- Real check ------------------------------------------------------------
 $source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
@@ -88,7 +140,7 @@ $literals = @(Get-QuotedErrorLiterals -Docs $docs)
 $missing = @()
 
 foreach ($item in $literals) {
-    if ($source -notmatch [regex]::Escape($item.Literal)) {
+    if (-not (Test-LiteralPresent -Source $source -Literal $item.Literal)) {
         $missing += $item
     }
 }

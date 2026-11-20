@@ -581,7 +581,7 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 | --- | --- |
 | `Provider '{id}' does not declare a supported package, so its model-list protocol is unknown.` | 见上「先过第一道门」——请求未发出，不消耗额度。 |
 | `Provider '{id}' uses an OpenAI-compatible package but does not define a base URL.` | 补 `settings.baseURL` 或 `options.baseURL`。 |
-| `Provider '{id}' uses an Anthropic-compatible package but does not define a base URL.` | 同上；**这条比 OpenAI 那条多一句 `; no model-list request was made`**，因为兼容网关可能根本没有 `/models`。 |
+| `Provider '{id}' uses an Anthropic-compatible package but does not define a base URL.` | 补 `settings.baseURL` 或 `options.baseURL`。**这条在构造请求之前就返回**——与对端是否实现 `/models` 无关，所以不要拿它去判断网关能力。 |
 | `Provider endpoint must use HTTP or HTTPS.` | 协议只能是 http / https。 |
 | `Provider endpoint URL must include a host.` | URL 缺主机名。 |
 | `Provider endpoint URL contains embedded credentials, which are not allowed.` | URL 里不能带 `user:pass@`。 |
@@ -698,11 +698,14 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 - 如果响应里带 `has_more: true`（Anthropic 用这个字段），工具**能识别**，并给出结局 3 那条 warning。
 - 但**工具不翻页**——你拿到的仍只有第一页。
 
-> **所以「当前页是否完整」不取决于模型总数，取决于这一次响应里 `has_more` 的值。**
-> 看到 warning 就是不全；没看到 warning 说明这一页的 `has_more` 是假——但那不保证供应商没有用别的分页字段。
-> **Anthropic 用 `has_more`，属于能被识别的那一类**（见上「识别范围」表）。
+> **当前页是否完整，只看这一次响应里有没有触发截断提示。**
+> 看到 warning 就是不全；**没看到 warning 不能反推「这一页是完整的」**——
+> 它只说明响应里没有被识别的信号。供应商可能用了未识别的分页字段（见上表），也可能根本没实现 `/models`。
+>
+> **工具只取第一页，不会按游标翻页。** 分页字段只用来判断"要不要提示你"，不用来继续取数据。
 
-**处置**：把 `limit` 调大重试，或手工补模型 ID。
+**处置**：**工具不会替你翻页，也不发送 `limit` 参数**——URL 里的查询串在构造请求时会被清空。
+所以拿到的就是对方默认返回的第一页：**缺的模型请手工补上模型 ID**，不要在配置里等它自动补齐。
 
 ### Anthropic 接入的两条已知限制
 
