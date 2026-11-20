@@ -1058,3 +1058,110 @@ async fn anthropic_truncated_page_produces_an_explicit_warning() {
         inventory.warnings
     );
 }
+
+/// The common OpenCode shape names the provider `anthropic` and omits
+/// `package`. It must resolve to the official endpoint rather than being
+/// refused for having no package.
+#[tokio::test]
+async fn a_builtin_anthropic_provider_id_resolves_without_a_package() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{"data": [{"type": "model", "id": "claude-opus-5-5"}], "has_more": false}"#,
+    )]);
+    // No `package` field at all: the protocol has to come from the exact ID.
+    let config_path = config_with(
+        &directory,
+        "anthropic-builtin.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "settings": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-builtin" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("a builtin anthropic provider must resolve");
+    assert_eq!(inventory.model_ids, vec!["claude-opus-5-5"]);
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].path, "/v1/models");
+    assert_eq!(requests[0].header("anthropic-version"), Some("2026-10-21"));
+}
+
+/// A provider key is never enough on its own for an unknown name: only the
+/// exact builtin IDs resolve, so a coincidental name cannot opt itself into a
+/// credentialed request.
+#[tokio::test]
+async fn an_unknown_provider_id_without_a_package_is_still_refused() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-lookalike.json",
+        "providers",
+        "anthropic-proxy",
+        &format!(
+            r#"{{ "settings": {{ "baseURL": "{}/v1", "apiKey": "sk-should-not-send" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let error = fetch_inventory(&config_path, "anthropic-proxy")
+        .await
+        .expect_err("an unknown provider id must not resolve by name alone");
+    assert!(
+        error.contains("does not declare a supported package"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.contains("sk-should-not-send"), "credential leak");
+    assert!(
+        server.requests().is_empty(),
+        "no request may be made for an unknown provider id"
+    );
+}
+
+/// An explicit credential header must stand on its own: a broken `apiKey`
+/// reference (here an environment variable that is not set) must not abort a
+/// request that already carries a usable `x-api-key`.
+#[tokio::test]
+async fn a_broken_api_key_reference_does_not_block_an_explicit_credential_header() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-broken-ref.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic", "env": ["OC_PROVIDERS_TEST_UNSET_KEY"], "settings": {{ "baseURL": "{}/v1", "apiKey": "{{env:OC_PROVIDERS_TEST_UNSET_KEY}}", "headers": {{ "x-api-key": "sk-ant-explicit" }} }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("an explicit credential header must not depend on the key reference");
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-explicit"));
+    assert_eq!(
+        requests[0].header("authorization"),
+        None,
+        "no second credential may be added"
+    );
+    // The unresolved env credential is not reported as "sent without
+    // authentication": the request did carry one. Warning about a missing
+    // credential here would push users to fix a key that is not in use.
+    assert!(
+        !inventory
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("without authentication")),
+        "a credentialed request must not be reported as unauthenticated: {:?}",
+        inventory.warnings
+    );
+}
