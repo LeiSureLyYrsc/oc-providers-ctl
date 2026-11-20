@@ -442,7 +442,8 @@ $occurrences = $literals.Count
 $distinct = @($literals | ForEach-Object { $_.Literal } | Sort-Object -Unique).Count
 Write-Output "Checked $occurrences excerpt occurrence(s) ($distinct distinct) across $($docs.Count) doc file(s), including $($requiredLiterals.Count) required excerpts."
 
-if ($missing.Count -gt 0 -or $suspicious.Count -gt 0) {
+$hasErrors = $missing.Count -gt 0 -or $suspicious.Count -gt 0
+if ($hasErrors) {
     Write-Output ""
     if ($missing.Count -gt 0) {
         Write-Output "UNVERIFIED - these are quoted in docs but absent from source:"
@@ -462,10 +463,9 @@ if ($missing.Count -gt 0 -or $suspicious.Count -gt 0) {
     Write-Output ""
     Write-Output "Either the doc quotes it inaccurately, or the source string changed and the doc must follow."
     Write-Output "A placeholder mismatch is NOT the cause: {name}, {} and <name> are all treated as equal."
-    exit 1
+} else {
+    Write-Output "OK - every checked literal exists in the Rust source (placeholders normalised)."
 }
-
-Write-Output "OK - every checked literal exists in the Rust source (placeholders normalised)."
 
 # Excerpts quoted only up to an abbreviation mark cannot be compared: there is
 # nothing after the mark to match. Reported, never silently accepted.
@@ -482,8 +482,8 @@ if ($skipped.Count -gt 0) {
         }
     }
 }
-# The four required excerpts are printed as id -> excerpt pairs on every run, not only on
-# failure. The script cannot prove an id is bound to the right sentence: swapping two
+# Print id -> excerpt pairs after checking, including when a wording check failed.
+# The script cannot prove an id is bound to the right sentence: swapping two
 # markers leaves both present, both real source strings, and the run green. A human must
 # read the pairs, so put them where a human reads. Printing the doc's own text is not a
 # second copy of the truth -- it is the same text, shown in the one place review happens.
@@ -501,4 +501,5 @@ Write-Output "against the throw sites on the branch you are documenting."
 Write-Output "It also does NOT prove that a required excerpt's fixed ID is bound to the right sentence."
 Write-Output "Swapping two markers still passes: both are present and both are real source strings."
 Write-Output "That pairing is verified by a human reading the pairs printed above, not by this script."
+if ($hasErrors) { exit 1 }
 exit 0
