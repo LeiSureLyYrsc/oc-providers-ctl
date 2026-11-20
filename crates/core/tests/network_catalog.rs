@@ -217,15 +217,9 @@ async fn catalog_refresh_caches_public_metadata_and_searches_locally() {
         "the catalog refresh request was never recorded, saw {}",
         server.request_count()
     );
-    // Upper bound: search must not perform network requests.
-    //
-    // Read `observed_count()`, which counts a request as soon as it has been
-    // read off the socket. `request_count()` would only see an extra request
-    // after its response had been written, and the fixture keeps one response
-    // unspent precisely so such a request can be accepted at all. `search` is a
-    // synchronous function with no network path, so a request it somehow issued
-    // would have to complete before it returned; no settle time is needed for
-    // this assertion to mean something.
+    // Count synchronous requests that wait for a response. The fixture counts
+    // them before writing the response, so this assertion can run immediately
+    // after search returns. A background request would need separate synchronization.
     assert_eq!(
         server.observed_count(),
         1,
@@ -665,16 +659,7 @@ fn catalog_types_are_public_and_serializable() {
     );
 }
 
-// Negative control for the observation point above: it shows the counter can
-// reach 2, so `observed_count() == 1` there means "nothing extra arrived"
-// rather than "nothing was ever counted".
-//
-// Scope, stated plainly: this test issues the extra request itself, with
-// reqwest. It proves the fixture is *capable* of observing a request beyond
-// the planned responses -- it does not, and cannot, prove that any product
-// code path issues one. `search` is synchronous and has no network path, so no
-// test on this fixture can make it leak a request. What the fixture buys is the
-// ability to catch such a path if one is ever introduced.
+// Inject a second request to verify the fixture can observe it.
 #[tokio::test]
 async fn mock_server_observes_a_request_beyond_the_planned_responses() {
     // The catalog test's shape: one planned response, one unwritten spare.

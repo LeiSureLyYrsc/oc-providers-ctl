@@ -86,11 +86,7 @@ pub struct MockServer {
     pub base_url: String,
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
-    /// Requests read off the socket, incremented *before* the response is
-    /// written. `requests` cannot answer "did the client send something we did
-    /// not expect": it is recorded last, by design, so an extra request can be
-    /// in flight (or answered) while the count still reads one short. This
-    /// counter makes such a request observable at the moment it arrives.
+    /// Parsed requests counted before the response write begins.
     observed: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     shutdown_listener: Option<TcpListener>,
@@ -163,19 +159,12 @@ impl MockServer {
                             thread::sleep(Duration::from_millis(1));
                             continue;
                         };
-                        // Mark arrival before answering: a request is
-                        // observable from the moment its bytes are in, which is
-                        // the earliest point a test could care about. Waiting
-                        // for the response write would let an unexpected
-                        // request hide behind the write timeout.
+                        // Count the parsed request before starting its response.
                         thread_observed.fetch_add(1, Ordering::SeqCst);
                         let response = responses[next_response].clone();
                         next_response += 1;
-                        // Record the completed request regardless of how much of
-                        // the response the client was willing to read; the
-                        // remaining planned responses stay queued in order. The
-                        // write-then-record order is deliberate -- see the note
-                        // on `read_request`.
+                        // Record after the write attempt ends so a recorded
+                        // request's response is no longer being written.
                         write_response(&mut stream, &response);
                         thread_requests.lock().unwrap().push(request);
                     }
@@ -223,17 +212,13 @@ impl MockServer {
         self.requests.lock().unwrap().len()
     }
 
-    /// Requests read off the socket so far, counted at arrival rather than at
-    /// the end of the response write.
+    /// Parsed requests counted before their response write begins.
     ///
-    /// This is the counter to assert an *upper* bound on. A request the server
-    /// did not plan for is visible here as soon as its bytes have been read,
-    /// whereas `request_count()` only sees it once its response has been
-    /// written -- and with no planned response left the accept loop has already
-    /// exited, so that request never reaches the recorded list at all. A test
-    /// asserting "no extra request was sent" must watch `observed_count()` and
-    /// must leave the server an unspent response so the extra request can be
-    /// accepted rather than left in the kernel backlog.
+    /// A request is visible here by the time the caller receives its response.
+    /// Leave a spare response so the server can accept an unexpected request.
+    /// An accepted connection without a parsed GET request does not count.
+    /// Background requests need a separate synchronization point before a test
+    /// can use this snapshot to check the count.
     pub fn observed_count(&self) -> usize {
         self.observed.load(Ordering::SeqCst)
     }
@@ -241,15 +226,9 @@ impl MockServer {
     /// Wait until at least `count` requests have been recorded, or the timeout
     /// expires. Returns whether the count was reached.
     ///
-    /// The server records a request *after* it has written the response, so a
-    /// caller that has just received a response may observe a count that is
-    /// still one short. Callers must therefore wait here rather than assert on
-    /// `request_count()` immediately.
-    ///
-    /// That ordering is deliberate: it keeps the count from running ahead of
-    /// delivery, so `wait_for_requests(n)` is a reliable signal that n
-    /// responses have actually been written. Reversing the two would make this
-    /// function return while a response was still going out.
+    /// Requests are recorded after their response write attempts end. A caller
+    /// that has just received a response can wait here for its request to be
+    /// recorded before checking the captured details.
     pub fn wait_for_requests(&self, count: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -290,10 +269,7 @@ impl Drop for MockServer {
     }
 }
 
-/// Read one request, write its prepared response and only then record it.
-///
-/// Recording last matters: `wait_for_requests` polls the recorded list, and a
-/// request must not look "done" while its response is still being written.
+/// Read and parse a complete GET request head from the stream.
 fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
     let mut buffer = Vec::new();
     loop {
