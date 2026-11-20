@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -86,6 +86,12 @@ pub struct MockServer {
     pub base_url: String,
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    /// Requests read off the socket, incremented *before* the response is
+    /// written. `requests` cannot answer "did the client send something we did
+    /// not expect": it is recorded last, by design, so an extra request can be
+    /// in flight (or answered) while the count still reads one short. This
+    /// counter makes such a request observable at the moment it arrives.
+    observed: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     shutdown_listener: Option<TcpListener>,
     join: Option<JoinHandle<()>>,
@@ -124,9 +130,11 @@ impl MockServer {
     pub fn start(responses: Vec<ResponseSpec>) -> Self {
         let (listener, addr) = bind_listener();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
 
         let thread_requests = Arc::clone(&requests);
+        let thread_observed = Arc::clone(&observed);
         let thread_stop = Arc::clone(&stop);
         // The shutdown handle owns its own listener clone, so `Drop` can
         // unblock a pending `accept` on every platform without waiting for the
@@ -155,6 +163,12 @@ impl MockServer {
                             thread::sleep(Duration::from_millis(1));
                             continue;
                         };
+                        // Mark arrival before answering: a request is
+                        // observable from the moment its bytes are in, which is
+                        // the earliest point a test could care about. Waiting
+                        // for the response write would let an unexpected
+                        // request hide behind the write timeout.
+                        thread_observed.fetch_add(1, Ordering::SeqCst);
                         let response = responses[next_response].clone();
                         next_response += 1;
                         // Record the completed request regardless of how much of
@@ -190,6 +204,7 @@ impl MockServer {
             base_url: format!("http://{addr}"),
             addr,
             requests,
+            observed,
             stop,
             shutdown_listener,
             join: Some(join),
@@ -206,6 +221,21 @@ impl MockServer {
 
     pub fn request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
+    }
+
+    /// Requests read off the socket so far, counted at arrival rather than at
+    /// the end of the response write.
+    ///
+    /// This is the counter to assert an *upper* bound on. A request the server
+    /// did not plan for is visible here as soon as its bytes have been read,
+    /// whereas `request_count()` only sees it once its response has been
+    /// written -- and with no planned response left the accept loop has already
+    /// exited, so that request never reaches the recorded list at all. A test
+    /// asserting "no extra request was sent" must watch `observed_count()` and
+    /// must leave the server an unspent response so the extra request can be
+    /// accepted rather than left in the kernel backlog.
+    pub fn observed_count(&self) -> usize {
+        self.observed.load(Ordering::SeqCst)
     }
 
     /// Wait until at least `count` requests have been recorded, or the timeout
