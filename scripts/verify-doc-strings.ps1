@@ -81,6 +81,12 @@ function Get-QuotedErrorLiterals {
     #                   strings are not, so a CJK character inside the span means we
     #                   caught prose rather than a message. `|` is excluded for the
     #                   same reason: it is table syntax, not message text.
+    # The two exclusions above are chosen for the CURRENT corpus: no Rust error string
+    # contains `|` or CJK today (checked across every capitalised, period-terminated
+    # literal in the five source files). They exist only to stop lazy matching from
+    # bridging prose. **If someone adds a message containing `|` or Chinese text, it
+    # becomes INVISIBLE again -- the same silent failure as the nested-backtick bug.**
+    # Re-check this class when the docs gain a message of that shape.
     $pattern = '`([A-Z][^\r\n|\u4e00-\u9fff\u3000-\u303f]{12,200}?\.)`'
     foreach ($doc in $Docs) {
         $text = [System.IO.File]::ReadAllText($doc.FullName, [System.Text.Encoding]::UTF8)
@@ -104,19 +110,31 @@ function Get-QuotedErrorLiterals {
 # deliberate negative case, the next person sees a green run and never learns
 # whether it could have gone red. So we prove the matcher rejects an absent string
 # on every single run, using the same function as the real check.
+#
+# Every case below runs against its OWN fixture. An earlier version compared the
+# sentinel against the real `$source`, which meant the self-test silently depended
+# on where in the file that variable was assigned: move the paragraphs and it
+# could pass without testing anything. A fixture cannot be moved out from under it.
 $source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
 
+# (a) an absent literal must be reported absent
+$absentFixture = 'Write-Output "Some other sentence entirely."'
 $sentinel = 'This sentence is deliberately absent from the source tree.'
-if (Test-LiteralPresent -Source $source -Literal $sentinel) {
-    Write-Output "SELF-TEST FAILED: the sentinel literal unexpectedly exists in source; pick a new one."
+if (Test-LiteralPresent -Source $absentFixture -Literal $sentinel) {
+    Write-Output "SELF-TEST FAILED: matcher reported a hit for an absent literal."
     exit 1
 }
 Write-Output "Self-test OK: an absent literal is correctly reported as absent."
 
-# Second, independent negative case: the matcher must be case-SENSITIVE.
-# Without this, the case-insensitivity bug fixed above could silently return.
-# It uses a real sentence from the docs in a different case, so if a future
-# change ever made the comparison case-insensitive again, this goes red.
+# (b) the sentinel is genuinely not in the source tree, so a green run above is not
+# an accident of the fixture. This one does read the real source, deliberately.
+if (Test-LiteralPresent -Source $source -Literal $sentinel) {
+    Write-Output "SELF-TEST FAILED: the sentinel literal unexpectedly exists in source; pick a new one."
+    exit 1
+}
+
+# (c) the matcher must be case-SENSITIVE. Without this the case-insensitivity bug
+# could silently return.
 $caseSource = 'Write-Output "The limit field must be an object."'
 $caseVariant = 'THE LIMIT FIELD MUST BE AN OBJECT.'
 if (Test-LiteralPresent -Source $caseSource -Literal $caseVariant) {
