@@ -27,12 +27,12 @@
 #   DOES NOT: follow how the message is assembled. It requires the quoted sentence to
 #             START a source literal. A doc may still quote only a message's first
 #             sentence -- that is a substring beginning right after the opening quote, and
-#             it passes. Any prefix kept OUT of that literal also passes: `concat!`, a
-#             `[..].concat()` array, `String + &str`, `format!`. All four measured; the
-#             verified sentence still starts right after its own quote, so the check
-#             cannot tell the final message changed. A prefix written INSIDE that one
-#             literal breaks the start and fails. So `concat!` is not special -- it is
-#             one spelling of a splice, and the check sees none of them.
+#             it passes. A separately assembled prefix leaves the result unchanged
+#             when the excerpt still passes the source boundary check. The script
+#             passed text examples using `concat!`, `[..].concat()`, `String + &str`,
+#             and `format!`. The final message can differ even though the excerpt
+#             still matches. Writing the prefix inside the source literal moves the
+#             sentence away from the opening quote and breaks that match.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
