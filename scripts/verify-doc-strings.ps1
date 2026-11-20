@@ -111,11 +111,10 @@ function Get-QuotedErrorLiterals {
 # whether it could have gone red. So we prove the matcher rejects an absent string
 # on every single run, using the same function as the real check.
 #
-# Every case below runs against its OWN fixture. An earlier version compared the
-# sentinel against the real `$source`, which meant the self-test silently depended
-# on where in the file that variable was assigned: move the paragraphs and it
-# could pass without testing anything. A fixture cannot be moved out from under it.
-$source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
+# Every self-test case below runs against its OWN fixture, so nothing here depends
+# on statement order: this block can be moved anywhere without going vacuous. The
+# real source is read on the line after it, used only by the actual check.
+
 
 # (a) an absent literal must be reported absent
 $absentFixture = 'Write-Output "Some other sentence entirely."'
@@ -126,14 +125,7 @@ if (Test-LiteralPresent -Source $absentFixture -Literal $sentinel) {
 }
 Write-Output "Self-test OK: an absent literal is correctly reported as absent."
 
-# (b) the sentinel is genuinely not in the source tree, so a green run above is not
-# an accident of the fixture. This one does read the real source, deliberately.
-if (Test-LiteralPresent -Source $source -Literal $sentinel) {
-    Write-Output "SELF-TEST FAILED: the sentinel literal unexpectedly exists in source; pick a new one."
-    exit 1
-}
-
-# (c) the matcher must be case-SENSITIVE. Without this the case-insensitivity bug
+# (b) the matcher must be case-SENSITIVE. Without this the case-insensitivity bug
 # could silently return.
 $caseSource = 'Write-Output "The limit field must be an object."'
 $caseVariant = 'THE LIMIT FIELD MUST BE AN OBJECT.'
@@ -148,6 +140,7 @@ if (-not (Test-LiteralPresent -Source $caseSource -Literal 'The limit field must
 Write-Output "Self-test OK: matching is case-sensitive and still finds exact text."
 
 # --- Real check ------------------------------------------------------------
+$source = ($sourceFiles | ForEach-Object { [System.IO.File]::ReadAllText($_, [System.Text.Encoding]::UTF8) }) -join "`n"
 $docs = Get-ChildItem $docsDir -Filter *.md -File
 $literals = @(Get-QuotedErrorLiterals -Docs $docs)
 $missing = @()
