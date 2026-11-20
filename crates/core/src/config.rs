@@ -160,65 +160,90 @@ impl FieldError {
 /// This is deliberately separate from `display_edit_path`: that one renders edit
 /// paths a user constructed, this one renders keys a user may not have looked at.
 fn display_diagnostic_path(path: &[String]) -> String {
-    // The leaf is the part that says what is wrong, so it is reserved first and
-    // the ancestors are what gets shortened. A path like
-    // `providers.<a very long id>.models.m.limit` must still end in `limit`,
-    // otherwise the message names a location but not the problem.
-    //
-    // One character is also reserved for the truncation ellipsis before anything
-    // is written, so appending it can never exceed the cap and no subtraction
-    // along the way can underflow.
-    let mut budget = MAX_DIAGNOSTIC_PATH.saturating_sub(1);
     if path.is_empty() {
         return String::new();
     }
 
-    // Reserve the leaf (and the separator that introduces it) out of the budget.
-    let leaf = &path[path.len() - 1];
-    let leaf_width = segment_width(leaf).min(MAX_DIAGNOSTIC_KEY);
-    let leaf_cost = leaf_width + usize::from(path.len() > 1);
-    if leaf_cost > budget {
-        // Pathologically tiny budget: render the leaf alone, truncated if needed.
+    // One character of the cap is held back for the truncation mark itself, so
+    // adding it can never push the result past `MAX_DIAGNOSTIC_PATH`.
+    let budget = MAX_DIAGNOSTIC_PATH.saturating_sub(1);
+
+    // Reserve the deepest segments first, working backwards from the leaf: the
+    // leaf says which field is wrong and the segments above it say where, so
+    // those are the last things to give up. A very long provider id earlier in
+    // the path is what gets shortened, not the field name at the end.
+    let mut tail_start = path.len();
+    let mut head_budget = budget;
+    while tail_start > 0 {
+        let segment = &path[tail_start - 1];
+        let separator = usize::from(tail_start < path.len());
+        let cost = segment_budget_cost(segment) + separator;
+        if cost > head_budget {
+            break;
+        }
+        head_budget -= cost;
+        tail_start -= 1;
+    }
+
+    // Not even the leaf fits on its own. Render what does fit of it and mark it.
+    if tail_start == path.len() {
+        let leaf = &path[path.len() - 1];
         let mut out = String::new();
         let mut leaf_budget = budget;
-        let complete = push_diagnostic_segment(&mut out, leaf, &mut leaf_budget);
-        if !complete {
+        if !push_diagnostic_segment(&mut out, leaf, &mut leaf_budget) {
             out.push('…');
         }
         return out;
     }
 
-    // Walk the ancestors into a scratch buffer with what is left.
-    let mut head = String::new();
-    let mut head_budget = budget - leaf_cost;
-    let mut truncated = false;
-    for (index, segment) in path[..path.len() - 1].iter().enumerate() {
+    // What is left renders the ancestors from the root; the first one that does
+    // not fit ends the head, and the ellipsis stands in for the rest of it.
+    let mut out = String::new();
+    for (index, segment) in path[..tail_start].iter().enumerate() {
         let separator = usize::from(index > 0);
-        // A visible truncation mark costs one character, so leave room for it.
-        if head_budget < separator + 2 {
-            truncated = true;
+        // The mark costs a character, so it is taken from the head budget
+        // before the segment that will need it.
+        if segment_budget_cost(segment) + separator + 1 > head_budget {
+            if head_budget > separator {
+                if index > 0 {
+                    out.push('.');
+                }
+                let mut segment_budget = head_budget - separator - 1;
+                let _ = push_diagnostic_segment(&mut out, segment, &mut segment_budget);
+                out.push('…');
+            }
             break;
         }
         if index > 0 {
-            head.push('.');
-            head_budget -= 1;
+            out.push('.');
         }
-        if !push_diagnostic_segment(&mut head, segment, &mut head_budget) {
-            truncated = true;
-            break;
-        }
+        let _ = push_diagnostic_segment(&mut out, segment, &mut head_budget);
     }
 
-    let mut out = head;
-    if truncated {
-        out.push('…');
-    }
     if !out.is_empty() {
         out.push('.');
     }
-    let mut leaf_budget = budget;
-    let _ = push_diagnostic_segment(&mut out, leaf, &mut leaf_budget);
+    for (index, segment) in path[tail_start..].iter().enumerate() {
+        if index > 0 {
+            out.push('.');
+        }
+        let mut segment_budget = segment_budget_cost(segment);
+        if !push_diagnostic_segment(&mut out, segment, &mut segment_budget) {
+            out.push('…');
+        }
+    }
     out
+}
+
+/// What one segment costs against the path budget, including the ellipsis it
+/// needs if it is itself too long to render in full.
+fn segment_budget_cost(segment: &str) -> usize {
+    let width = segment_width(segment);
+    if width > MAX_DIAGNOSTIC_KEY {
+        MAX_DIAGNOSTIC_KEY + 1
+    } else {
+        width
+    }
 }
 
 /// How many characters a key would render as, before any budget is applied.
@@ -4136,7 +4161,6 @@ mod diagnostic_path_tests {
     }
 
     #[test]
-    #[test]
     fn a_budget_that_ends_exactly_on_the_cap_does_not_overflow() {
         // A single key can never render longer than MAX_DIAGNOSTIC_KEY, so one
         // huge key is stopped by the per-key limit before the path budget is
@@ -4197,11 +4221,24 @@ mod diagnostic_path_tests {
 
     #[test]
     fn many_short_segments_stop_before_overflowing() {
-        // Enough segments that the whole path cannot fit; the result must still
-        // respect the cap and end with a truncation mark.
+        // Enough segments that the whole path cannot fit. The mark belongs where
+        // the path was shortened, not at the end: everything after it is kept,
+        // so the deepest segments are what survive.
         let segments: Vec<String> = (0..MAX_DIAGNOSTIC_PATH).map(|i| format!("s{i}")).collect();
         let rendered = assert_within_cap(&segments.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-        assert!(rendered.ends_with('…'), "expected truncation: {rendered:?}");
+        assert!(
+            rendered.contains('…'),
+            "a shortened path must say where it was cut: {rendered:?}"
+        );
+        assert!(
+            !rendered.ends_with('…'),
+            "the deepest segments are kept, so no mark belongs at the end: {rendered:?}"
+        );
+        let last = segments.last().expect("non-empty");
+        assert!(
+            rendered.ends_with(last.as_str()),
+            "the leaf must still be named: {rendered:?}"
+        );
     }
 
     #[test]
