@@ -1233,3 +1233,83 @@ async fn a_nonexistent_anthropic_compatible_aisdk_package_is_refused() {
     );
     assert!(server.requests().is_empty(), "no request may be made");
 }
+
+/// The V1 shape names the package `npm` and its settings `options`, and
+/// `extract_provider_settings` normalises both V1 and V2 into one
+/// `ProviderSettings`. So support must not depend on which spelling the user's
+/// file happens to use -- a V1 file that already named `@ai-sdk/anthropic`
+/// must resolve exactly like the V2 equivalent.
+#[tokio::test]
+async fn the_v1_npm_and_options_shape_resolves_the_same_as_v2() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(
+        r#"{"data": [{"type": "model", "id": "claude-opus-5-5"}], "has_more": false}"#,
+    )]);
+    // V1: `npm` + `options`, no `package` and no `settings`.
+    let config_path = config_with(
+        &directory,
+        "anthropic-v1.jsonc",
+        "provider",
+        "anthropic",
+        &format!(
+            r#"{{ "npm": "@ai-sdk/anthropic", "options": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-v1" }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("the V1 npm/options shape must resolve");
+    assert_eq!(inventory.model_ids, vec!["claude-opus-5-5"]);
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].path, "/v1/models");
+    assert_eq!(
+        requests[0].header("anthropic-version"),
+        Some("2026-10-21"),
+        "V1 must get the version header too"
+    );
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-ant-v1"),
+        "the options.apiKey must be used"
+    );
+}
+
+/// V1 reads headers from `options.headers`, so an Anthropic version pinned
+/// there must be honoured and must suppress the second credential in the same
+/// way it does through `settings.headers`.
+#[tokio::test]
+async fn the_v1_options_headers_carry_the_version_and_suppress_the_bearer() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![ResponseSpec::json(r#"{"data":[]}"#)]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-v1-headers.jsonc",
+        "provider",
+        "anthropic",
+        &format!(
+            r#"{{ "npm": "@ai-sdk/anthropic", "options": {{ "baseURL": "{}/v1", "apiKey": "sk-ant-v1-unused", "headers": {{ "x-api-key": "sk-ant-v1-explicit", "anthropic-version": "2023-06-01" }} }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let _ = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("inventory");
+
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+    let requests = server.requests();
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-v1-explicit"));
+    assert_eq!(
+        requests[0].header("anthropic-version"),
+        Some("2023-06-01"),
+        "a version pinned in options.headers must win over the default"
+    );
+    assert_eq!(
+        requests[0].header("authorization"),
+        None,
+        "no second credential, same as the settings shape"
+    );
+}
