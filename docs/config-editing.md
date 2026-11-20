@@ -412,8 +412,8 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 
 > **判据是「这条消息校验的是什么」，不是反引号。** 校验本次提交的值（`edit.value`）→ 可达；
 > 校验源文件里已有的内容 → 只有当该字段在 `provider_has_invalid_types` 覆盖范围内时才被门禁抢先。
-> **反引号只是排版习惯，不是判据**：`config.rs` 里带反引号的字符串有 25 处（4 条 warning、12 条纯字面量错误、
-> 9 条带占位符的错误），其中只有本表第 1–2 行不可达。**不要按反引号归类，也不要背清单——清单必然不全，
+> **反引号只是排版习惯，不是判据。** 本文件里带反引号的提示既可能可达也可能不可达，
+> 两半都有反例。**不要按反引号归类，也不要背一张「带反引号的提示清单」——清单必然不全，
 > 判据才可维护。** 反例：`validate_edit_batch` 里那条「一次 `set` 编辑必须带值」同样带反引号，
 > 却在 `prepare_changes` 的逐条校验里先于任何字段判断执行——它是所有编辑请求都会过的第一关。
 
@@ -528,12 +528,12 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 
 #### 先过第一道门：这个供应商允不允许拉
 
-**在做任何排查之前先确认这一层。** 只有包名在白名单里（或未声明包名时用内置名 `openai` / `openrouter` / `xai`），
+**在做任何排查之前先确认这一层。** 只有包名在白名单里（或未声明包名时用内置名 `openai` / `openrouter` / `xai` / `anthropic`），
 才会**发出请求**。否则在发请求前就被拒绝，你会看到：
 
 | 提示原文 | 含义 |
 | --- | --- |
-| `Provider '{id}' does not declare an OpenAI-compatible package, so its model-list protocol is unknown.` | 没声明包名，且不是内置名。补一个官方 OpenAI 兼容包名，或手工填模型。 |
+| `Provider '{id}' does not declare a supported package, so its model-list protocol is unknown.` | 没声明包名，且不是内置名。补一个官方 OpenAI 或 Anthropic 包名，或手工填模型。 |
 | `Provider '{id}' uses the unsupported package '{pkg}'.` | 包名不在白名单内。同上。 |
 
 > **这两条都属于「请求根本没发出去」**——不消耗额度，也不涉及下面四种结局。
@@ -541,15 +541,26 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 >
 > ⚠️ **注意范围**：Gemini、Cohere 的**原生**配置属于这一层被拒的情况。
 > 下面的分页问题只适用于**已经通过包检查、并且真的收到了这类响应**的端点。
->
-> **Anthropic 正在变化**：PR #3（`feat/anthropic-inventory`）把
-> `@opencode/ai/providers/anthropic` 与 `.../anthropic-compatible` 加入白名单。
-> **该 PR 合并前**，Anthropic 原生配置仍然过不了这道门；**合并后**可以。
-> 以你实际运行的版本为准，不要照本文判断。
 
-白名单是**精确包名匹配**（不是子串包含）。**基线（`main`）**是这四个包及其写法：
-`@ai-sdk/openai`、`@ai-sdk/openai-compatible`、`@openrouter/ai-sdk-provider`、`@ai-sdk/xai`
-（含 `aisdk:` 前缀写法、`@opencode/ai/providers/<name>` 写法，以及各自的 `.../responses`、`.../chat` 变体）。
+白名单是**精确包名匹配**（不是子串包含）。当前（`main`）接受的包名：
+
+| 协议 | 接受的包名 |
+| --- | --- |
+| OpenAI | `@ai-sdk/openai`、`aisdk:@ai-sdk/openai`、`@opencode/ai/providers/openai`、`.../openai/chat`、`.../openai/responses` |
+| OpenAI 兼容 | `@ai-sdk/openai-compatible`、`aisdk:@ai-sdk/openai-compatible`、`@opencode/ai/providers/openai-compatible`、`.../openai-compatible/responses` |
+| OpenRouter | `@openrouter/ai-sdk-provider`、`aisdk:@openrouter/ai-sdk-provider`、`@opencode/ai/providers/openrouter` |
+| xAI | `@ai-sdk/xai`、`aisdk:@ai-sdk/xai`、`@opencode/ai/providers/xai` |
+| Anthropic | `@ai-sdk/anthropic`、`aisdk:@ai-sdk/anthropic`、`@opencode/ai/providers/anthropic` |
+| Anthropic 兼容网关 | `@opencode/ai/providers/anthropic-compatible` |
+
+> **`@ai-sdk/anthropic-compatible` 不在这张表里，这是有意的**——该包在 npm 上不存在，
+> 列出来等于宣称支持一个装不上的东西。第三方 Anthropic 兼容网关要用
+> `@opencode/ai/providers/anthropic-compatible`。
+>
+> **未声明包名时的内置名是四个精确键**：`openai` / `openrouter` / `xai` / `anthropic`。
+> 名字像但不是这四个（例如 `anthropic-proxy`）仍然被拒——**照名字猜协议会让一个起错名的
+> 条目拿到带凭据的请求。** 显式包名永远优先于内置名：叫 `anthropic` 但配了兼容网关的条目，
+> 走网关分支，不吃内置默认 base。
 
 未声明的供应商**不会被猜测接口**——这是刻意的安全设计：精确匹配避免 `malicious-acme-openai`
 这种名字自我授权拿到带凭据的请求。
@@ -568,8 +579,9 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 
 | 提示原文 | 含义与处置 |
 | --- | --- |
-| `Provider '{id}' does not declare an OpenAI-compatible package, so its model-list protocol is unknown.` | 见上「先过第一道门」——请求未发出，不消耗额度。 |
+| `Provider '{id}' does not declare a supported package, so its model-list protocol is unknown.` | 见上「先过第一道门」——请求未发出，不消耗额度。 |
 | `Provider '{id}' uses an OpenAI-compatible package but does not define a base URL.` | 补 `settings.baseURL` 或 `options.baseURL`。 |
+| `Provider '{id}' uses an Anthropic-compatible package but does not define a base URL.` | 同上；**这条比 OpenAI 那条多一句 `; no model-list request was made`**，因为兼容网关可能根本没有 `/models`。 |
 | `Provider endpoint must use HTTP or HTTPS.` | 协议只能是 http / https。 |
 | `Provider endpoint URL must include a host.` | URL 缺主机名。 |
 | `Provider endpoint URL contains embedded credentials, which are not allowed.` | URL 里不能带 `user:pass@`。 |
@@ -637,7 +649,7 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 那些前提必须一起给读者，否则他无从判断这个结论有多牢固。
 若你实测发现某家其实返回了 `id`，请告诉我们——那是这条结论被推翻的直接证据。
 
-原因：解析返回项时只认 `id` / `model` / `model_id` / `modelId` 四个键（`inventory.rs:793`），
+原因：解析返回项时只认 `id` / `model` / `model_id` / `modelId` 四个键（`inventory.rs` 的 `extract_model_ids`），
 而这几家用 `name`（如 `"name": "models/gemini-2.5-pro"`）。容器 `models` 数组能认出来，
 但元素没有那四个键，于是每项都被计入 `skipped`，最终 0 个模型。
 
@@ -646,7 +658,7 @@ model  级：limit / reasoning / capabilities / variants / name / id / modelID
 下表是**接入时需要处理的协议差异**，不是说这些供应商现在都能拉。前提是它们已经通过上面的包检查。
 **【推】** 分页字段名与默认每页条数引自 @Anna 的官方文档核实（2026-11-20），**本项目未用真实凭据打过这些端点**。
 
-**识别范围是两边都要说的**：只说「认哪些」会高估覆盖，只说「不认哪些」会低估。`object_has_more`（`inventory.rs:808-823`）实际是：
+**识别范围是两边都要说的**：只说「认哪些」会高估覆盖，只说「不认哪些」会低估。`object_has_more`（`inventory.rs` 的 `object_has_more`）实际是：
 
 | 认得（会给你提示，结局 3） | 不认得（静默截断，结局 4） |
 | --- | --- |
@@ -694,9 +706,9 @@ warning 提示，**不会静默**（Anthropic 属于结局 3）。若用户显�
 所以翻页不是「可选项」，是**下一次发版就到期**的项——这改变的是排期，不是范围。
 
 
-### Anthropic 接入的三条已知限制（PR #3，尚未合并）
+### Anthropic 接入的两条已知限制
 
-下面三条是**用户会踩到**的，不是实现细节。PR #3 合并后仍然存在。第 1 条与他家共用，只是 Anthropic 最容易踩。
+下面两条是**用户会踩到**的，不是实现细节。第 1 条与他家共用，只是 Anthropic 最容易踩。
 
 #### 1. baseURL 只写域名会 404（Anthropic 尤其容易踩）
 
@@ -779,27 +791,29 @@ baseURL 的路径非空  →  <baseURL>/models
 > 这一条是【推】：我们没打过任何第三方 Anthropic 兼容网关。但它是可预见的——
 > 用 `anthropic-compatible` 的那批用户，恰恰最可能没实现 `/models`。
 
-#### 3. V1 方言下 `@ai-sdk/anthropic` 会被拒绝
+#### 3. `@ai-sdk/anthropic-compatible` 这个包不存在
 
-白名单收的是 `@opencode/ai/providers/anthropic` / `.../anthropic-compatible`（**V2 写法**）。
-**`@ai-sdk/anthropic` 不在白名单里**，而 V1 方言用的正是 `npm` 字段，models.dev 给 Anthropic 的
-npm 就是 `@ai-sdk/anthropic`。
+Anthropic 的**原生**协议（`@ai-sdk/anthropic`、`aisdk:@ai-sdk/anthropic`、
+`@opencode/ai/providers/anthropic`）和 **Anthropic 兼容网关**协议
+（`@opencode/ai/providers/anthropic-compatible`）都在白名单里，V1 的 `npm` 写法和 V2 的 `package` 写法都能用。
 
-**后果**：一份 **V1 的 Anthropic 配置会在拉取模型列表时被拒**，而同样写法的 V1 OpenAI 配置能用。
-所以「OpenAI + Anthropic 都支持」目前**只在 V2 成立**。
+但 **`@ai-sdk/anthropic-compatible` 是刻意不收录的**——它在 npm 上不存在（源码注释记录了
+2026-11-20 的 404 检查），收录等于宣称支持一个装不上的东西。
 
-> 【码】白名单里确实没有 `@ai-sdk/anthropic`（对比 `@ai-sdk/openai`、`@ai-sdk/openai-compatible`、
-> `@ai-sdk/xai` 都在）。这条是有意还是遗漏，需实现方确认；本文只描述当前行为。
+**后果**：照 OpenAI 的命名规律推导「Anthropic 也应该有 `@ai-sdk/anthropic-compatible`」的人，
+会拿到 `uses the unsupported package` 这条拒绝。
 
-**遇到时的处置**：在 V2 配置里改用 `@opencode/ai/providers/anthropic`，或手工填模型 ID。
+**处置**：第三方 Anthropic 兼容网关用 `@opencode/ai/providers/anthropic-compatible`；
+原生 Anthropic 用 `@ai-sdk/anthropic`。
+
 ---
 
 #### 其它已知限制（不是配置错误）
 
-- **查询串会被清空**：构造请求时 `set_query(None)`（`inventory.rs:503`）。
+- **查询串会被清空**：构造请求时 `set_query(None)`（`inventory.rs` 的 `models_endpoint` 里 `base.set_query(None)`）。
   若某家需要在 URL 上带参数（例如 Azure 的 `api-version`），当前会丢参数而失败。
 - **分页不跟进，而且只有部分供应商会提示**：代码只认 `has_more` / `pagination.has_more` /
-  `next` / `next_page` / `nextPage`（`inventory.rs:808-823`），且**不翻页**。
+  `next` / `next_page` / `nextPage`（`inventory.rs` 的 `object_has_more`），且**不翻页**。
   - Anthropic 用 `has_more` → **能识别**，会给结局 3 那条 warning，但列表仍只有一页（默认 20 条）。
   - **Gemini（`nextPageToken`）、Cohere（`next_page_token`）、Fireworks（`nextPageToken`）
     的分页字段不在识别范围内 → 连 warning 都没有**，看起来像"全部拉到了"。
