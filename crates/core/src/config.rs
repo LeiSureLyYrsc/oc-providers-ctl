@@ -160,158 +160,53 @@ impl FieldError {
 /// This is deliberately separate from `display_edit_path`: that one renders edit
 /// paths a user constructed, this one renders keys a user may not have looked at.
 fn display_diagnostic_path(path: &[String]) -> String {
-    if path.is_empty() {
+    let segments: Vec<String> = path
+        .iter()
+        .map(|segment| render_diagnostic_segment(segment))
+        .collect();
+    let Some((root, tail)) = segments.split_first() else {
         return String::new();
+    };
+
+    let full_width = segments
+        .iter()
+        .map(|segment| segment.chars().count())
+        .sum::<usize>()
+        + tail.len();
+    if full_width <= MAX_DIAGNOSTIC_PATH {
+        return segments.join(".");
     }
 
-    // One character of the cap is held back for the truncation mark itself, so
-    // adding it can never push the result past `MAX_DIAGNOSTIC_PATH`.
-    let budget = MAX_DIAGNOSTIC_PATH.saturating_sub(1);
-
-    // Reserve the deepest segments first, working backwards from the leaf: the
-    // leaf says which field is wrong and the segments above it say where, so
-    // those are the last things to give up. A very long provider id earlier in
-    // the path is what gets shortened, not the field name at the end.
-    let mut tail_start = path.len();
-    let mut head_budget = budget;
-    while tail_start > 0 {
-        let segment = &path[tail_start - 1];
-        let separator = usize::from(tail_start < path.len());
-        let cost = segment_budget_cost(segment) + separator;
-        if cost > head_budget {
+    // Keep the root and as much of the suffix as fits. The omitted middle is
+    // represented by a segment of its own, so the field name stays identifiable.
+    let mut width = root.chars().count() + 2; // ".…"; the suffix adds its own dot.
+    let mut suffix_start = tail.len();
+    for (index, segment) in tail.iter().enumerate().rev() {
+        let cost = 1 + segment.chars().count();
+        if width + cost > MAX_DIAGNOSTIC_PATH {
             break;
         }
-        head_budget -= cost;
-        tail_start -= 1;
+        width += cost;
+        suffix_start = index;
     }
+    let suffix = tail[suffix_start..].join(".");
+    format!("{root}.….{suffix}")
+}
 
-    // Not even the leaf fits on its own. Render what does fit of it and mark it.
-    if tail_start == path.len() {
-        let leaf = &path[path.len() - 1];
-        let mut out = String::new();
-        let mut leaf_budget = budget;
-        if !push_diagnostic_segment(&mut out, leaf, &mut leaf_budget) {
-            out.push('…');
-        }
-        return out;
-    }
-
-    // What is left renders the ancestors from the root; the first one that does
-    // not fit ends the head, and the ellipsis stands in for the rest of it.
+/// Render one key within its own width limit, including quotes and ellipsis.
+fn render_diagnostic_segment(segment: &str) -> String {
+    let quoted = segment.is_empty()
+        || !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
+    let mut remaining = MAX_DIAGNOSTIC_KEY - 2 * usize::from(quoted);
     let mut out = String::new();
-    for (index, segment) in path[..tail_start].iter().enumerate() {
-        let separator = usize::from(index > 0);
-        // The mark costs a character, so it is taken from the head budget
-        // before the segment that will need it.
-        if segment_budget_cost(segment) + separator + 1 > head_budget {
-            if head_budget > separator {
-                if index > 0 {
-                    out.push('.');
-                }
-                let mut segment_budget = head_budget - separator - 1;
-                let _ = push_diagnostic_segment(&mut out, segment, &mut segment_budget);
-                out.push('…');
-            }
-            break;
-        }
-        if index > 0 {
-            out.push('.');
-        }
-        let _ = push_diagnostic_segment(&mut out, segment, &mut head_budget);
-    }
-
-    if !out.is_empty() {
-        out.push('.');
-    }
-    for (index, segment) in path[tail_start..].iter().enumerate() {
-        if index > 0 {
-            out.push('.');
-        }
-        let mut segment_budget = segment_budget_cost(segment);
-        if !push_diagnostic_segment(&mut out, segment, &mut segment_budget) {
-            out.push('…');
-        }
-    }
-    out
-}
-
-/// What one segment costs against the path budget, including the ellipsis it
-/// needs if it is itself too long to render in full.
-fn segment_budget_cost(segment: &str) -> usize {
-    let width = segment_width(segment);
-    if width > MAX_DIAGNOSTIC_KEY {
-        MAX_DIAGNOSTIC_KEY + 1
-    } else {
-        width
-    }
-}
-
-/// How many characters a key would render as, before any budget is applied.
-fn segment_width(segment: &str) -> usize {
-    let plain = segment
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
-    let body: usize = segment.chars().map(rendered_char_len).sum();
-    if plain {
-        body
-    } else {
-        body + 2
-    }
-}
-
-/// How many characters one source character renders as.
-fn rendered_char_len(c: char) -> usize {
-    if c.is_control() {
-        c.escape_debug().count()
-    } else if c == '\\' || c == '"' {
-        2
-    } else {
-        1
-    }
-}
-
-/// Render one key into `out`, spending at most `budget` characters of it.
-///
-/// Returns `false` when the key did not fit and was truncated. The caller's
-/// budget is decremented by exactly what was written, so it can never go
-/// negative: every write is preceded by a check that it fits.
-fn push_diagnostic_segment(out: &mut String, segment: &str, budget: &mut usize) -> bool {
-    let plain = segment
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
-
-    // Quotes are two of the characters this key is allowed, so they come out of
-    // the key's own allowance before any of its text does.
-    let quotes = if plain { 0 } else { 2 };
-    if *budget < quotes {
-        return false;
-    }
-    let allowance = (*budget).min(MAX_DIAGNOSTIC_KEY);
-    let text_allowance = allowance.saturating_sub(quotes);
-
-    if !plain {
+    if quoted {
         out.push('"');
-        *budget -= 1;
     }
-    let (text, spent, complete) = render_key_chars(segment, text_allowance);
-    out.push_str(&text);
-    *budget -= spent;
-    if !plain {
-        out.push('"');
-        *budget -= 1;
-    }
-    complete
-}
 
-/// Render as much of `key` as fits in `allowance` rendered characters.
-///
-/// Returns the text, how many rendered characters it costs, and whether the
-/// whole key fit. A control character renders as up to six characters
-/// (`\u{1}`), which is why counting source characters would be wrong.
-fn render_key_chars(key: &str, allowance: usize) -> (String, usize, bool) {
-    let mut out = String::new();
-    let mut spent = 0;
-    for c in key.chars() {
+    let mut last_char_start = out.len();
+    for c in segment.chars() {
         let rendered: String = if c.is_control() {
             c.escape_debug().collect()
         } else if c == '\\' || c == '"' {
@@ -320,13 +215,23 @@ fn render_key_chars(key: &str, allowance: usize) -> (String, usize, bool) {
             c.to_string()
         };
         let cost = rendered.chars().count();
-        if spent + cost > allowance {
-            return (out, spent, false);
+        if cost > remaining {
+            if remaining == 0 {
+                // Replace the last complete character or escape with the mark.
+                out.truncate(last_char_start);
+            }
+            out.push('…');
+            break;
         }
-        spent += cost;
+        last_char_start = out.len();
         out.push_str(&rendered);
+        remaining -= cost;
     }
-    (out, spent, true)
+
+    if quoted {
+        out.push('"');
+    }
+    out
 }
 
 /// At most `MAX_REPORTED_FIELD_ERRORS` field sentences, plus a count of the rest.
@@ -4137,8 +4042,11 @@ fn rollback_error_message(
 }
 
 #[cfg(test)]
-mod diagnostic_path_tests {
-    use super::{display_diagnostic_path, MAX_DIAGNOSTIC_KEY, MAX_DIAGNOSTIC_PATH};
+mod diagnostic_tests {
+    use super::{
+        display_diagnostic_path, field_error_sentences, FieldError, MAX_DIAGNOSTIC_KEY,
+        MAX_DIAGNOSTIC_PATH, MAX_REPORTED_FIELD_ERRORS,
+    };
 
     fn len(path: &[&str]) -> usize {
         display_diagnostic_path(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -4161,84 +4069,44 @@ mod diagnostic_path_tests {
     }
 
     #[test]
-    fn a_budget_that_ends_exactly_on_the_cap_does_not_overflow() {
-        // A single key can never render longer than MAX_DIAGNOSTIC_KEY, so one
-        // huge key is stopped by the per-key limit before the path budget is
-        // reached. That is the first boundary and it must hold on its own.
-        let huge = "k".repeat(MAX_DIAGNOSTIC_PATH);
-        let rendered = assert_within_cap(&[huge.as_str()]);
-        assert!(
-            rendered.ends_with('…'),
-            "a key past the per-key cap must be truncated: {rendered:?}"
-        );
-        assert!(
-            rendered.chars().count() <= MAX_DIAGNOSTIC_KEY + 1,
-            "a single key is capped at {MAX_DIAGNOSTIC_KEY} plus its ellipsis, \
-             got {}: {rendered:?}",
-            rendered.chars().count()
-        );
-
-        // The whole-path budget is what the rest of this test is about: keys
-        // that each fit their own cap, whose sum would overflow the path cap.
-        let segment = "k".repeat(MAX_DIAGNOSTIC_KEY);
-        let many: Vec<&str> = (0..10).map(|_| segment.as_str()).collect();
-        let rendered = assert_within_cap(&many);
-        assert!(
-            rendered.contains("…"),
-            "a path past the overall cap must show where it was shortened: {rendered:?}"
-        );
-        assert!(
-            rendered.ends_with("kkkk"),
-            "the last segment is kept whole, not cut: {rendered:?}"
-        );
-
-        // A quoted key has to pay for its quotes out of the same budget; this
-        // is the case the old code could underflow on.
-        let quoted = format!("{}.{}", "k".repeat(150), "j".repeat(150));
-        let _ = assert_within_cap(&[quoted.as_str()]);
+    fn a_path_at_the_cap_keeps_all_segments() {
+        let short = "k".repeat(49);
+        let leaf = "m".repeat(50);
+        let segments = [
+            short.as_str(),
+            short.as_str(),
+            short.as_str(),
+            leaf.as_str(),
+        ];
+        let rendered = assert_within_cap(&segments);
+        assert_eq!(rendered.chars().count(), MAX_DIAGNOSTIC_PATH);
+        assert_eq!(rendered, segments.join("."));
     }
 
     #[test]
-    fn the_leaf_is_kept_even_when_a_long_ancestor_exhausts_the_budget() {
-        // The leaf is what says which field is wrong, so an over-long provider
-        // id must shorten the ancestors, never drop the leaf. A path that ends
-        // in an ellipsis names a location but not the problem.
+    fn an_overlong_key_preserves_the_following_segments() {
         let long_id = "k".repeat(400);
+        let prefix = "k".repeat(MAX_DIAGNOSTIC_KEY - 1);
         let rendered = assert_within_cap(&["providers", long_id.as_str(), "models", "m", "limit"]);
-        assert!(
-            rendered.ends_with(".limit"),
-            "the leaf must survive truncation: {rendered:?}"
-        );
-        assert!(
-            rendered.starts_with("providers."),
-            "the path must still start at the document root: {rendered:?}"
-        );
-        assert!(
-            rendered.contains('…'),
-            "the shortened part must be marked: {rendered:?}"
-        );
+        assert_eq!(rendered, format!("providers.{prefix}….models.m.limit"));
+
+        let rendered_leaf = assert_within_cap(&[long_id.as_str()]);
+        assert_eq!(rendered_leaf, format!("{prefix}…"));
     }
 
     #[test]
-    fn many_short_segments_stop_before_overflowing() {
-        // Enough segments that the whole path cannot fit. The mark belongs where
-        // the path was shortened, not at the end: everything after it is kept,
-        // so the deepest segments are what survive.
-        let segments: Vec<String> = (0..MAX_DIAGNOSTIC_PATH).map(|i| format!("s{i}")).collect();
-        let rendered = assert_within_cap(&segments.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-        assert!(
-            rendered.contains('…'),
-            "a shortened path must say where it was cut: {rendered:?}"
-        );
-        assert!(
-            !rendered.ends_with('…'),
-            "the deepest segments are kept, so no mark belongs at the end: {rendered:?}"
-        );
-        let last = segments.last().expect("non-empty");
-        assert!(
-            rendered.ends_with(last.as_str()),
-            "the leaf must still be named: {rendered:?}"
-        );
+    fn an_overlong_path_keeps_the_root_and_leaf() {
+        let segment = "k".repeat(50);
+        let rendered = assert_within_cap(&[
+            "providers",
+            segment.as_str(),
+            segment.as_str(),
+            segment.as_str(),
+            segment.as_str(),
+            "limit",
+        ]);
+        assert!(rendered.starts_with("providers.…."));
+        assert!(rendered.ends_with(".limit"));
     }
 
     #[test]
@@ -4247,6 +4115,7 @@ mod diagnostic_path_tests {
         // is short in source is long on screen. The cap must be on what shows.
         let control = "\u{1}".repeat(MAX_DIAGNOSTIC_KEY * 4);
         let rendered = assert_within_cap(&[control.as_str()]);
+        assert!(rendered.chars().count() <= MAX_DIAGNOSTIC_KEY);
         assert!(
             !rendered.chars().any(|c| c.is_control()),
             "no raw control character may be emitted: {rendered:?}"
@@ -4270,5 +4139,18 @@ mod diagnostic_path_tests {
                 .collect::<Vec<_>>(),
         );
         assert_eq!(dotted, r#"providers.acme.models."gpt-4.1".limit"#);
+    }
+
+    #[test]
+    fn the_display_limit_does_not_add_a_zero_count_summary() {
+        let error = FieldError {
+            path: vec!["providers".to_string(), "acme".to_string()],
+            expected: "an object",
+        };
+        let errors = vec![error; MAX_REPORTED_FIELD_ERRORS];
+        assert_eq!(
+            field_error_sentences(&errors).len(),
+            MAX_REPORTED_FIELD_ERRORS
+        );
     }
 }
