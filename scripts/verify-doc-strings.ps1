@@ -24,15 +24,18 @@
 #             boundary test, because a placeholder is what made their spelling ambiguous.
 #             State it here because a protection that covers only some excerpts, with
 #             no stated range, reads as covering all of them.
-#   DOES NOT: follow how the message is assembled. It requires the quoted sentence to
-#             START a source literal. A doc may still quote only a message's first
-#             sentence -- that is a substring beginning right after the opening quote, and
-#             it passes. A separately assembled prefix leaves the result unchanged
-#             when the excerpt still passes the source boundary check. The script
-#             passed text examples using `concat!`, `[..].concat()`, `String + &str`,
-#             and `format!`. The final message can differ even though the excerpt
-#             still matches. Writing the prefix inside the source literal moves the
-#             sentence away from the opening quote and breaks that match.
+#   DOES NOT: follow how the message is assembled. What it checks is that the character
+#             right before the excerpt is a double quote -- a cheap stand-in for "the
+#             excerpt starts where some literal starts", not the thing itself. So a
+#             prefix kept out of that literal passes (`concat!`, `[..].concat()`,
+#             `String + &str`, `format!`; all four measured), and so does a prefix
+#             inside it whose last character happens to be a quote (`\"`, or a literal
+#             quote inside a raw string; both measured). Only a prefix inside the literal
+#             ending in an ordinary character breaks the quote, and that fails. The
+#             stand-in cannot see whether the quote is escaped, which is why it is a
+#             stand-in and not the real question. Do not turn that into a list of the
+#             spellings that happen to work: the character test has more ways to be
+#             fooled than anyone has enumerated.
 #
 #   A wording check passing is NOT a classification check passing. This has already
 #   bitten us once: an index of error messages was built by extracting literals from
