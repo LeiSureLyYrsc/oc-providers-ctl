@@ -337,7 +337,23 @@ if ($skipped.Count -gt 0) {
         }
     }
 }
+# The four required excerpts are printed as id -> excerpt pairs on every run, not only on
+# failure. The script cannot prove an id is bound to the right sentence: swapping two
+# markers leaves both present, both real source strings, and the run green. A human must
+# read the pairs, so put them where a human reads. Printing the doc's own text is not a
+# second copy of the truth -- it is the same text, shown in the one place review happens.
+Write-Output ""
+Write-Output "Required excerpts (id -> text currently bound to it; verify these pairings by eye):"
+foreach ($item in $requiredLiterals) {
+    Write-Output ("  {0}" -f $item.Id)
+    Write-Output ("    -> {0}" -f $item.Literal)
+}
+
+Write-Output ""
 Write-Output "Reminder: this proves no drift in wording only. It does NOT prove the surrounding advice,"
 Write-Output "or which code path raises a message, or how many paths do. Those need spot-checking"
 Write-Output "against the throw sites on the branch you are documenting."
+Write-Output "It also does NOT prove that a required excerpt's fixed ID is bound to the right sentence."
+Write-Output "Swapping two markers still passes: both are present and both are real source strings."
+Write-Output "That pairing is verified by a human reading the pairs printed above, not by this script."
 exit 0
