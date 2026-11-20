@@ -1586,10 +1586,18 @@ fn diagnostic_path_escapes_control_characters_in_user_keys() {
 
     // The warning list is rendered from the same pass, so it must be equally
     // safe: this is the "refusal and warnings stay consistent" half.
-    let warnings = doc.warnings.join("\n");
+    // Checked element by element, not on a joined blob: a join would put its own
+    // separator into the string and hide which warning carried what.
+    for warning in &doc.warnings {
+        assert!(
+            !warning.chars().any(|c| c.is_control()),
+            "no warning may contain a raw control character: {warning:?}"
+        );
+    }
     assert!(
-        !warnings.chars().any(|c| c.is_control()),
-        "the warning list must not contain a raw control character: {warnings:?}"
+        doc.warnings.iter().any(|w| w.contains("must be an object")),
+        "the warning list must name the wrong-typed field too: {:?}",
+        doc.warnings
     );
 }
 
@@ -1624,5 +1632,55 @@ fn diagnostic_path_caps_an_overlong_key_and_still_names_the_field() {
     assert!(
         err.contains("providers."),
         "the path must still start at the document root: {err}"
+    );
+}
+
+#[test]
+fn field_error_truncation_counts_per_file_not_per_provider() {
+    // Two broken providers, three wrong-typed fields each. The "and N more"
+    // sentence describes the whole file, so it must appear exactly once in the
+    // warnings and once in the refusal -- not once per provider.
+    let source = br#"{
+  "providers": {
+    "a": { "name": 5, "models": "nope", "env": "nope" },
+    "b": { "name": 5, "models": "nope", "env": "nope" }
+  }
+}
+"#;
+    let (_dir, path) = write_config("many.jsonc", source);
+    let doc = read_document(&path).expect("read");
+    assert!(!doc.writable);
+
+    let err = prepare_changes(&path, &doc.hash, &[edit_set(&["model"], json!("a/b"))])
+        .expect_err("read-only");
+
+    let more_in_err = err.matches("more field(s)").count();
+    assert_eq!(
+        more_in_err, 1,
+        "the truncation summary must appear once for the whole file, not per \
+         provider: {err}"
+    );
+    assert!(
+        err.contains("2 more field(s) in this file have an invalid shape."),
+        "six errors with four shown leaves two hidden: {err}"
+    );
+
+    // Same count on the warning side: the two surfaces are rendered from one
+    // pass and must not disagree about how many fields they hid.
+    let more_in_warnings: Vec<&String> = doc
+        .warnings
+        .iter()
+        .filter(|w| w.contains("more field(s)"))
+        .collect();
+    assert_eq!(
+        more_in_warnings.len(),
+        1,
+        "the warning list must carry exactly one truncation summary: {:?}",
+        doc.warnings
+    );
+    assert!(
+        more_in_warnings[0].contains("2 more field(s)"),
+        "the warning list must hide the same number the refusal does: {}",
+        more_in_warnings[0]
     );
 }
