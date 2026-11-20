@@ -713,7 +713,7 @@ async fn unknown_or_malicious_packages_are_refused_without_a_request() {
 async fn pagination_and_empty_listings_add_explicit_warnings() {
     let directory = tempfile::tempdir().expect("tempdir");
     let server = MockServer::start(vec![
-        ResponseSpec::json(r#"{"data":[{"id":"a"}],"has_more":true}"#),
+        ResponseSpec::json(r#"{"data":[{"id":"a"}],"has_more":true,"last_id":"a"}"#),
         ResponseSpec::json(r#"{"data":[]}"#),
     ]);
     let config_path = config_with(
@@ -880,9 +880,7 @@ async fn anthropic_package_uses_the_native_endpoint_and_sends_a_version_header()
         inventory.model_ids,
         vec!["claude-opus-5-5", "claude-sonnet-5"]
     );
-    // Two models is far below the page size, so nothing must claim truncation.
-    // IDs come back sorted (`extract_model_ids` sorts and dedups), which is why
-    // the assertion below is in alphabetical order rather than API order.
+    // The server marked this as the final page.
     assert!(
         !inventory
             .warnings
@@ -1035,18 +1033,14 @@ async fn an_unsupported_package_names_both_supported_families() {
     );
 }
 
-/// Anthropic reports `has_more` when a page is not the whole list. Today the
-/// code detects it and warns rather than paginating, so the warning is the
-/// contract this test pins.
 #[tokio::test]
-async fn anthropic_truncated_page_produces_an_explicit_warning() {
+async fn anthropic_page_without_a_cursor_produces_an_explicit_warning() {
     let directory = tempfile::tempdir().expect("tempdir");
     let server = MockServer::start(vec![ResponseSpec::json(
         r#"{
             "data": [{"type": "model", "id": "claude-a"}, {"type": "model", "id": "claude-b"}],
             "has_more": true,
-            "first_id": "claude-a",
-            "last_id": "claude-b"
+            "first_id": "claude-a"
         }"#,
     )]);
     let config_path = config_with(
@@ -1072,6 +1066,166 @@ async fn anthropic_truncated_page_produces_an_explicit_warning() {
         "a partial page must warn rather than pass silently: {:?}",
         inventory.warnings
     );
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn anthropic_inventory_follows_the_cursor_and_merges_raw_ids() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![
+        ResponseSpec::json(
+            r#"{"data":[{"id":"claude-b"}, {}],"has_more":true,"last_id":"cursor/1?limit=1&x=y"}"#,
+        ),
+        ResponseSpec::json(
+            r#"{"data":[{"id":"claude-b"},{"id":" claude-a "}, {}],"has_more":false,"last_id":"unused"}"#,
+        ),
+    ]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-paginated.json",
+        "providers",
+        "anthropic",
+        &format!(
+            r#"{{ "package": "@opencode/ai/providers/anthropic-compatible", "settings": {{ "baseURL": "{}/v1?limit=1000", "headers": {{ "x-api-key": "fixture-key" }} }} }}"#,
+            server.base_url
+        ),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("complete inventory");
+    assert_eq!(inventory.model_ids, vec![" claude-a ", "claude-b"]);
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("Ignored 2 ")));
+    assert!(!inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("truncated")));
+    assert_no_secret(&inventory, "fixture-key");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].target, "/v1/models");
+    let url = url::Url::parse(&format!("{}{}", server.base_url, requests[1].target))
+        .expect("request URL");
+    assert_eq!(url.path(), "/v1/models");
+    let mut query_pairs = url.query_pairs();
+    let (key, value) = query_pairs.next().expect("cursor query");
+    assert_eq!(key, "after_id");
+    assert_eq!(value, "cursor/1?limit=1&x=y");
+    assert_eq!(query_pairs.next(), None);
+    for request in requests {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.header("x-api-key"), Some("fixture-key"));
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(request.header("anthropic-version"), Some("2026-10-21"));
+    }
+}
+
+#[tokio::test]
+async fn anthropic_inventory_stops_on_a_cursor_cycle() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(
+        [
+            ("claude-a", "cursor-a"),
+            ("claude-b", "cursor-b"),
+            ("claude-c", "cursor-a"),
+        ]
+        .into_iter()
+        .map(|(id, cursor)| {
+            ResponseSpec::json(format!(
+                r#"{{"data":[{{"id":"{id}"}}],"has_more":true,"last_id":"{cursor}"}}"#
+            ))
+        })
+        .chain(std::iter::once(ResponseSpec::json(
+            r#"{"data":[{"id":"unexpected"}]}"#,
+        )))
+        .collect(),
+    );
+    let config_path = config_with(
+        &directory,
+        "anthropic-cycle.json",
+        "providers",
+        "anthropic",
+        &format!(r#"{{"settings":{{"baseURL":"{}/v1"}}}}"#, server.base_url),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("partial inventory");
+    assert_eq!(
+        inventory.model_ids,
+        vec!["claude-a", "claude-b", "claude-c"]
+    );
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("may be truncated")));
+    assert_eq!(server.request_count(), 3);
+}
+
+#[tokio::test]
+async fn anthropic_inventory_keeps_completed_pages_if_the_next_request_fails() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(vec![
+        ResponseSpec::json(r#"{"data":[{"id":"claude-a"}],"has_more":true,"last_id":"claude-a"}"#),
+        ResponseSpec::empty(503).with_body("private upstream details"),
+    ]);
+    let config_path = config_with(
+        &directory,
+        "anthropic-partial.json",
+        "providers",
+        "anthropic",
+        &format!(r#"{{"settings":{{"baseURL":"{}/v1"}}}}"#, server.base_url),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("partial inventory");
+    assert_eq!(inventory.model_ids, vec!["claude-a"]);
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("may be truncated")));
+    assert_no_secret(&inventory, "private upstream details");
+    assert_eq!(server.request_count(), 2);
+}
+
+#[tokio::test]
+async fn anthropic_inventory_stops_at_the_page_limit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let server = MockServer::start(
+        (1..=51)
+            .map(|page| {
+                ResponseSpec::json(format!(
+                    r#"{{"data":[{{"id":"claude-{page:02}"}}],"has_more":true,"last_id":"page-{page}"}}"#
+                ))
+            })
+            .collect(),
+    );
+    let config_path = config_with(
+        &directory,
+        "anthropic-limit.json",
+        "providers",
+        "anthropic",
+        &format!(r#"{{"settings":{{"baseURL":"{}/v1"}}}}"#, server.base_url),
+    );
+
+    let inventory = fetch_inventory(&config_path, "anthropic")
+        .await
+        .expect("bounded inventory");
+    assert_eq!(inventory.model_ids.len(), 50);
+    assert_eq!(
+        inventory.model_ids.last().map(String::as_str),
+        Some("claude-50")
+    );
+    assert!(inventory
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("may be truncated")));
+    assert_eq!(server.request_count(), 50);
 }
 
 /// The common OpenCode shape names the provider `anthropic` and omits
