@@ -175,8 +175,14 @@ fn candidate_json(candidate: &ModelCandidate) -> Value {
 #[tokio::test]
 async fn catalog_refresh_caches_public_metadata_and_searches_locally() {
     let cache_dir = temp_cache();
+    // The second response is never spent by this test's own traffic. It exists
+    // so that a request the test did not plan for can still be accepted and
+    // answered: a server that stops after its planned responses leaves such a
+    // request in the kernel backlog, invisible to both the recorded list and
+    // `observed_count()`.
     let server = MockServer::start(vec![
-        ResponseSpec::json(CATALOG_FIXTURE).with_header("ETag", "\"catalog-v1\"")
+        ResponseSpec::json(CATALOG_FIXTURE).with_header("ETag", "\"catalog-v1\""),
+        ResponseSpec::empty(500),
     ]);
     let mut catalog = catalog_from_server(&cache_dir, &server);
 
@@ -211,13 +217,17 @@ async fn catalog_refresh_caches_public_metadata_and_searches_locally() {
         "the catalog refresh request was never recorded, saw {}",
         server.request_count()
     );
-    // Upper bound: this can only say "no extra request was recorded". The mock
-    // server stops accepting once its planned responses are served, so a request
-    // that search() should not have made would never reach the recorded list and
-    // this assertion could not see it. Letting the fixture accept an extra
-    // request is what would make the extra one observable.
+    // Upper bound: search must not perform network requests.
+    //
+    // Read `observed_count()`, which counts a request as soon as it has been
+    // read off the socket. `request_count()` would only see an extra request
+    // after its response had been written, and the fixture keeps one response
+    // unspent precisely so such a request can be accepted at all. `search` is a
+    // synchronous function with no network path, so a request it somehow issued
+    // would have to complete before it returned; no settle time is needed for
+    // this assertion to mean something.
     assert_eq!(
-        server.request_count(),
+        server.observed_count(),
         1,
         "search must not perform network requests"
     );
@@ -652,5 +662,48 @@ fn catalog_types_are_public_and_serializable() {
     assert_eq!(
         serde_json::to_value(result).unwrap()["modelCount"],
         serde_json::json!(1)
+    );
+}
+
+// Negative control for the observation point above: it shows the counter can
+// reach 2, so `observed_count() == 1` there means "nothing extra arrived"
+// rather than "nothing was ever counted".
+//
+// Scope, stated plainly: this test issues the extra request itself, with
+// reqwest. It proves the fixture is *capable* of observing a request beyond
+// the planned responses -- it does not, and cannot, prove that any product
+// code path issues one. `search` is synchronous and has no network path, so no
+// test on this fixture can make it leak a request. What the fixture buys is the
+// ability to catch such a path if one is ever introduced.
+#[tokio::test]
+async fn mock_server_observes_a_request_beyond_the_planned_responses() {
+    // The catalog test's shape: one planned response, one unwritten spare.
+    let server = MockServer::start(vec![
+        ResponseSpec::json(CATALOG_FIXTURE).with_header("ETag", "\"catalog-v1\""),
+        ResponseSpec::empty(500),
+    ]);
+
+    // One planned request, sent the way the client sends it.
+    let first = reqwest::Client::new()
+        .get(format!("{}/api.json", server.base_url))
+        .send()
+        .await
+        .expect("first request");
+    assert_eq!(first.status().as_u16(), 200);
+    assert!(server.wait_for_requests(1, Duration::from_secs(2)));
+
+    // A second request the fixture did not plan for.
+    let second = reqwest::Client::new()
+        .get(format!("{}/api.json", server.base_url))
+        .send()
+        .await
+        .expect("second request");
+    assert_eq!(second.status().as_u16(), 500);
+
+    // The point of the whole exercise: the extra request is observable.
+    assert_eq!(
+        server.observed_count(),
+        2,
+        "the fixture must see a request it did not plan for"
     );
 }
