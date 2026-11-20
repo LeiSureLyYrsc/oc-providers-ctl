@@ -161,12 +161,21 @@ impl FieldError {
 /// paths a user constructed, this one renders keys a user may not have looked at.
 fn display_diagnostic_path(path: &[String]) -> String {
     let mut out = String::new();
+    // Budget is counted in characters that will actually be shown, not in
+    // source characters: one control character can render as six, so counting
+    // the source would let a key of control characters blow the limit.
+    let mut remaining = MAX_DIAGNOSTIC_PATH;
     for (index, segment) in path.iter().enumerate() {
         if index > 0 {
+            if remaining <= 1 {
+                out.push('…');
+                break;
+            }
             out.push('.');
+            remaining -= 1;
         }
-        push_diagnostic_segment(&mut out, segment);
-        if out.chars().count() >= MAX_DIAGNOSTIC_PATH {
+        push_diagnostic_segment(&mut out, segment, &mut remaining);
+        if remaining <= 1 {
             out.push('…');
             break;
         }
@@ -174,38 +183,63 @@ fn display_diagnostic_path(path: &[String]) -> String {
     out
 }
 
-fn push_diagnostic_segment(out: &mut String, segment: &str) {
+/// Render one key, spending at most `remaining` characters of the caller's
+/// budget. Quotes and the truncation ellipsis are charged to the same budget.
+fn push_diagnostic_segment(out: &mut String, segment: &str, remaining: &mut usize) {
     let plain = segment
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
+    // A key is never allowed more than `MAX_DIAGNOSTIC_KEY` rendered
+    // characters, and never more than what the whole-path budget has left.
+    let allowance = (*remaining).min(MAX_DIAGNOSTIC_KEY);
     if plain {
-        push_capped(out, segment);
+        let (text, spent) = render_key_chars(segment, allowance);
+        out.push_str(&text);
+        *remaining -= spent;
         return;
     }
     // Quote it, as `display_edit_path` does, so a key containing a dot cannot
     // read as two extra levels of nesting.
     out.push('"');
-    let mut remaining = MAX_DIAGNOSTIC_KEY;
-    for c in segment.chars() {
-        if remaining == 0 {
-            out.push('…');
-            break;
-        }
-        // `escape_debug` turns a control character into its visible escape
-        // (`\n`, `\u{1}`) instead of letting it through raw.
-        if c.is_control() {
-            for escaped in c.escape_debug() {
-                out.push(escaped);
-            }
-        } else if c == '\\' || c == '"' {
-            out.push('\\');
-            out.push(c);
-        } else {
-            out.push(c);
-        }
-        remaining -= 1;
-    }
+    *remaining -= 1;
+    // One more character is reserved for the closing quote.
+    let allowance = allowance.saturating_sub(2);
+    let (text, spent) = render_key_chars(segment, allowance);
+    out.push_str(&text);
     out.push('"');
+    *remaining -= spent + 1;
+}
+
+/// Render as much of `key` as fits in `allowance` rendered characters.
+///
+/// Returns the text and how many rendered characters it costs, so the caller
+/// can keep an exact budget: a control character renders as up to six
+/// characters (`\u{1}`), which is why counting source characters would be
+/// wrong.
+fn render_key_chars(key: &str, allowance: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut spent = 0;
+    for c in key.chars() {
+        let rendered: String = if c.is_control() {
+            c.escape_debug().collect()
+        } else if c == '\\' || c == '"' {
+            format!("\\{c}")
+        } else {
+            c.to_string()
+        };
+        let cost = rendered.chars().count();
+        if spent + cost > allowance {
+            // Truncated: mark it, if there is room for the mark.
+            if spent < allowance {
+                out.push('…');
+                spent += 1;
+            }
+            return (out, spent);
+        }
+        spent += cost;
+        out.push_str(&rendered);
+    }
+    (out, spent)
 }
 
 fn push_capped(out: &mut String, segment: &str) {
@@ -972,6 +1006,14 @@ fn analyze_file(loaded: &LoadedFile) -> Analysis {
         );
     }
 
+    // Rendered once, after every provider has been classified, so the "and N
+    // more" count is per file. Rendering inside the per-provider loop would
+    // emit one truncation summary per provider, which is not what the message
+    // says it is.
+    for sentence in field_error_sentences(&facts.field_errors) {
+        warnings.push(sentence);
+    }
+
     // Only a genuine mixture gets the mixture warning. A file whose only problem
     // is a wrong-typed field already has the field-level sentences above, and
     // repeating "nested V1/V2 syntax" there would be the same misleading claim
@@ -1050,16 +1092,17 @@ fn collect_providers(
             provider_classify(obj, map_dialect, &provider_path);
         if !entry_field_errors.is_empty() {
             facts.unsafe_nesting = true;
-            for sentence in field_error_sentences(&entry_field_errors) {
-                warnings.push(sentence);
-            }
+            // Collected here, rendered once in `analyze_file`, so the truncation
+            // count is per file rather than per provider: a file with five
+            // broken providers must say "and N more" once, not five times.
             facts.field_errors.extend(entry_field_errors);
         }
         if entry_mixes {
             facts.unsafe_nesting = true;
             facts.mixes_syntax = true;
             warnings.push(format!(
-                "Provider '{id}' mixes V1 and V2 syntax and is read-only."
+                "Provider `{}` mixes V1 and V2 syntax and is read-only.",
+                display_diagnostic_path(&provider_path)
             ));
         }
         if entry_dialect == Dialect::Mixed {
@@ -1145,8 +1188,13 @@ fn collect_providers(
                 if model_obj.is_some() && model_mixes {
                     facts.unsafe_nesting = true;
                     facts.mixes_syntax = true;
+                    // Same safe rendering as the refusal: the model id and the
+                    // provider id both come straight from the user's file.
+                    let model_path = child_path(&provider_path, "models");
+                    let model_path = child_path(&model_path, &model_id);
                     warnings.push(format!(
-                        "Model '{model_id}' in provider '{id}' mixes V1 and V2 syntax and is read-only."
+                        "Model `{}` mixes V1 and V2 syntax and is read-only.",
+                        display_diagnostic_path(&model_path)
                     ));
                 }
                 models.push(model_entry(model_id, model_obj, model_dialect));
