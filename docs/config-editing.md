@@ -686,11 +686,11 @@ warning 提示，**不会静默**（Anthropic 属于结局 3）。若用户显�
 所以翻页不是「可选项」，是**下一次发版就到期**的项——这改变的是排期，不是范围。
 
 
-### Anthropic 接入的两条已知限制（PR #3，尚未合并）
+### Anthropic 接入的三条已知限制（PR #3，尚未合并）
 
-下面两条是**用户会踩到**的，不是实现细节。PR #3 合并后仍然存在。
+下面三条是**用户会踩到**的，不是实现细节。PR #3 合并后仍然存在。第 1 条与他家共用，只是 Anthropic 最容易踩。
 
-#### 0. baseURL 只写域名会 404（Anthropic 尤其容易踩）
+#### 1. baseURL 只写域名会 404（Anthropic 尤其容易踩）
 
 **这是最容易误判成「我的 key 坏了」的一条。** 模型列表的 URL 是这么拼的：
 
@@ -751,7 +751,7 @@ baseURL 的路径非空  →  <baseURL>/models
 
 ---
 
-#### 1. `anthropic-compatible` 指向的第三方网关，可能根本没有 `/models`
+#### 2. `anthropic-compatible` 指向的第三方网关，可能根本没有 `/models`
 
 `anthropic-compatible` 是给**第三方兼容网关**用的。而 `/models` 在 Anthropic 官方那边也是较新的
 端点——我们确认它存在，靠的是匿名请求 `api.anthropic.com` 拿到 401（**路径存在，只是要认证**）。
@@ -771,7 +771,7 @@ baseURL 的路径非空  →  <baseURL>/models
 > 这一条是【推】：我们没打过任何第三方 Anthropic 兼容网关。但它是可预见的——
 > 用 `anthropic-compatible` 的那批用户，恰恰最可能没实现 `/models`。
 
-#### 2. V1 方言下 `@ai-sdk/anthropic` 会被拒绝
+#### 3. V1 方言下 `@ai-sdk/anthropic` 会被拒绝
 
 白名单收的是 `@opencode/ai/providers/anthropic` / `.../anthropic-compatible`（**V2 写法**）。
 **`@ai-sdk/anthropic` 不在白名单里**，而 V1 方言用的正是 `npm` 字段，models.dev 给 Anthropic 的
