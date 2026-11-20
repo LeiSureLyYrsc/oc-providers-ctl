@@ -279,45 +279,24 @@ The configuration field `providers.acme.models."gpt-4.1".limit` must be an objec
 Fix the listed field(s) before editing this file.
 ```
 
-四点：
-
 - **路径里的双引号是故意的。** 含 `.`（或其他不在 `A-Z a-z 0-9 _ - / : @` 里的字符）的键会被引号包住，
   **所以带点的模型 ID 算一段，不会被读成多两层的嵌套**。
-- **过长的路径会在中间截断**，用一个 `…` 表示省略的部分；**路径开头和末尾的字段名仍会保留**，
-  所以你能看出是哪个字段坏了。**出现 `…` 就表示有内容被省略**——没出现，就表示没有省略。
 - **不是所有坏字段都会逐条点名。** 前面是几条点名的句子，后面跟一句计数：
   `2 more field(s) in this file have an invalid shape.`——**`field(s)` 是实际输出（不是占位符），
   `2` 是这份文件里还有多少个字段没被点名**，不是总数、也不是 provider 数。**计数是按文件算的**：
   **一份文件里坏了好几处，也只会出现一次「还有 N 个」**，不会每个 provider 各来一次。
 
-**`…` 有两种来源：一种是我们加的省略标记，一种是你键名里本来就有的。**
+**路径中的 `…`** 既可以是键名的一部分，也可以表示省略。
 
-```
-providers.acme.models."…".limit
-  └ 引号里只有这一个符号 = 这个模型 ID 本身就叫 …
+| 示例 | 含义 |
+| --- | --- |
+| `providers.acme.models."…".limit` | 模型 ID 就是 `…`。 |
+| `providers.kkkk….models.m.limit` | 供应商键名过长，省略号加在键段末尾，后面的 `.models.m.limit` 仍完整显示。这里用 `kkkk` 简写保留下来的键名前缀。 |
+| `providers.….limit` | 格式示意。路径过长时，保留开头和能放下的连续尾部。单独一段 `…` 代表省略的中间路径段。 |
 
-providers.kkkk…kkkk.models.m.limit
-  └ 紧贴键名字符 = 这个键名太长，被截短了；路径没被截，后面几段全在
+如果引号内的键名以 `…` 结尾，可以回源文件确认键名。例如，真实键名 `abc…` 会显示为 `"abc…"`。
 
-providers.….bbbb….models.m.limit
-  └ 两边都是点 = 中间有整段路径被省略
-```
-
-| 你看到 | 含义 | 该怎么办 |
-| --- | --- | --- |
-| 引号里**只有**一个 `…`（`"…"`） | 这是**真实键名**——那个键本来就叫 `…` | 不用管 |
-| `…` 紧贴着**键名字符** | **这个键名太长**，被截短了 | 键名确实过长了，考虑改短 |
-| `…` **两边都是点**（`….`） | **中间整段路径被省略** | 路径太深或某段太长；末尾字段名仍保留，可据此定位 |
-
-> **「引号里有 `…` 结尾」不等于「被截断」。** 你的键名本身就可能以 `…` 结尾（比如真的叫 `abc…`），
-> 这时输出和截断后的样子**长得一样**，光看提示分辨不出来。**所以别拿这个当判据**——
-> 觉得可疑就回源文件看一眼那个键的真实名字。
-
-> **路径太长时的行为是「保留开头，再保留能放下的连续尾部」，中间那段被省掉。**
-> 省掉的可能是整段，也可能是若干段；**保留下来的尾部是连续的**，
-> 所以末尾那个字段名一定还在，你总能看出坏的是哪个字段。
-
-**字段类型错和真正的方言混用同时存在时，两条原因都给：**
+字段类型错误和方言混用并存时，拒写提示会列出两种原因。下方将同一条提示分行展示。
 
 ```
 The configuration field `providers.acme.models."gpt-4.1".limit` must be an object.
@@ -327,14 +306,12 @@ Fix the listed field(s) before editing this file.
 
 #### 拒写提示和配置详情里的警告，文字不完全相同
 
-同一份文件，两处清单**来自同一遍分析**，但**拼装方式不同**：
+配置详情与拒写提示使用同一套字段检查。
 
 | 位置 | 你看到什么 |
 | --- | --- |
-| 配置详情（警告列表） | 字段句 + 计数句，**没有**结尾那句 `Fix the listed…` |
-| 拒写提示（编辑被拒绝时） | 字段句 + 计数句 +（若真混用）混用句 + **`Fix the listed field(s) before editing this file.`** |
-
-**别指望两处逐字相同**——详情给你看清单，拒写告诉你下一步做什么。
+| 配置详情（警告列表） | 字段提示会逐条列出，省略的字段另有计数。混用时还会列出 `Nested V1/V2 provider syntax is unsafe to edit; this file is read-only.` |
+| 拒写提示（编辑被拒绝时） | 字段提示、省略计数（如有）、混用原因（如有）合成一条错误，末尾加上 `Fix the listed field(s) before editing this file.` |
 
 #### 哪些「字段类型错」的提示看得到，哪些仍然看不到
 
@@ -343,10 +320,7 @@ Fix the listed field(s) before editing this file.
 | 它校验的是 | 现在能否看到 | 例 |
 | --- | --- | --- |
 | **你这次提交的值** | **看得到** | `The limit field must be an object.`（新建模型时） |
-| **源文件里已有的内容** | **看不到原句**，改为文件级拒写 | `The `limit` field must be an object.` |
-
-**带反引号的 `The `limit` field must be an object.` 仍然看不到**——但原因变了：以前是被文件级只读门禁挡住，
-现在被**字段级**门禁挡住，而字段级门禁会直接说出路径和期望类型。**你拿到的是更有用的那句话。**
+| **源文件里已有的 `limit`** | 文件级拒写会给出路径和期望类型 | 源码中的 ``The `limit` field must be an object.`` 由此前的拒写检查挡住。 |
 
 > **「带不带反引号」不是判据。** `Model capabilities must be an object.` 没有反引号却**可达**，
 > 因为它在新建路径上校验的是你提交的值。按措辞配对会漏——本文就漏过一条，是照这个规则补齐的。
@@ -362,6 +336,7 @@ Fix the listed field(s) before editing this file.
 
 > 所以别记成「凡是讲源文件类型错的消息都不可达」——**那是一条会骗人的全称结论**。
 > 判据是「这个字段会不会让整份文件只读」，一个个核，别推广。
+
 #### 为什么同一句话会有三处来源（技术细节，排查时可跳过）
 
 写入分三层独立进行，三层都会在删除遇到父级不通时报这一句——
@@ -390,8 +365,8 @@ Fix the listed field(s) before editing this file.
 
 > **顺序是有讲究的，表就是按顺序排的。** `prepare_changes` 里的判断依次是：
 > 解析失败或 `dialect` 为 `Invalid` →
-> 重复 key → **字段级类型错** → 真正的方言混用。**前面的门一旦命中就直接返回，后面的门根本轮不到。**
-> 所以一份文件同时有多个问题时，你只看到**最靠前**的那一句；**把这一句修好再来，才会露出下一句**。
+> 重复 key → **字段类型错误** → 方言混用。编辑请求返回最先命中的拒写原因。
+> 如果文件同时有字段类型错误和方言混用，字段类型错误这一项会在同一次拒写中列出两种原因。
 
 > **`warnings` 里的文字不是返回给用户的错误。** `A provider map has an invalid shape and is read-only.`
 > 只在只读横幅里出现；编辑请求本身返回的是上表第一行那句。**「这句话存在」不等于「用户会看到它」。**
@@ -425,8 +400,8 @@ Fix the listed field(s) before editing this file.
 
 | 提示原文 | 含义与处置 |
 | --- | --- |
-| `The `limit` field must be an object.` | **当前用户看不到原句。** 源文件里 `limit` 不是对象时，会先撞上字段级门禁，你拿到的是指出路径和期望类型的那句（`The configuration field `{}` must be {expected}.`）。见上「源文件里的字段类型错，现在会指出具体路径」。 |
-| `The `capabilities` field must be an object.` | **当前用户看不到原句。** 同上，`capabilities` 不是对象同样会先触字段级门禁。 |
+| ``The `limit` field must be an object.`` | 源文件里的 `limit` 类型不符时，编辑请求先返回字段诊断 ``The configuration field `{}` must be {expected}.``，指出路径和期望类型。 |
+| ``The `capabilities` field must be an object.`` | 源文件里的 `capabilities` 类型不符时，编辑请求先返回字段诊断。 |
 | `The limit field must be an object.` | **新建模型时**，提交的 `limit` 不是对象。改本次输入。 |
 | `Model capabilities must be an object.` | **新建模型时**，提交的 `capabilities` 不是对象。改本次输入。 |
 | `The provider options/settings field must be an object.` | **新建供应商时**，提交的 `options` / `settings` 不是对象。改本次输入。 |
@@ -438,7 +413,7 @@ Fix the listed field(s) before editing this file.
 | `The provider map has an invalid shape.` | **这句从编辑入口不可达。** 顶层 `provider`/`providers` 不是对象时 `dialect` 被判为 `Invalid`，`prepare_changes` 在更前面就返回 **`This configuration cannot be parsed safely as JSONC.`**（`prepare_changes` 的解析门禁）。**不是** `unsafe mixture` 那句——`unsafe_nesting` 的检查在它之后。处置：修顶层结构。 |
 | `The configuration root must be an object.` | 配置文件最外层不是对象（比如是个数组或裸值）。源文件需人工修正。 |
 | `The target object could not be located safely.` / `The target object range is not safe to edit.` | 要改的那段在文件里的位置无法安全定位（格式太特殊）。调整文件格式或手工编辑。 |
-| `The provider `<key>` field has an invalid shape.` | 该字段存在但类型不对。**这句从编辑入口不可达**：该字段类型错会先触字段级门禁（见上）。处置：改源文件。 |
+| ``The provider `<key>` field has an invalid shape.`` | 该字段存在但类型不对。**这句从编辑入口不可达**：该字段类型错会先触字段级门禁（见上）。处置：改源文件。 |
 | `The model identifier is empty or too long.` | 模型键名为空或过长（上限 256 字符）。 |
 | `The {label} identifier is empty or too long.` | 同上，`{label}` 会是 `provider` 或 `model`。 |
 | `The {label} identifier contains control characters.` | ID 里有控制字符。 |
