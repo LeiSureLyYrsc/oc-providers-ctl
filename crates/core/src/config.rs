@@ -160,63 +160,78 @@ impl FieldError {
 /// This is deliberately separate from `display_edit_path`: that one renders edit
 /// paths a user constructed, this one renders keys a user may not have looked at.
 fn display_diagnostic_path(path: &[String]) -> String {
+    // One character is reserved for the truncation ellipsis before anything is
+    // written, so appending it can never exceed the cap and no subtraction along
+    // the way can underflow.
+    let mut budget = MAX_DIAGNOSTIC_PATH.saturating_sub(1);
     let mut out = String::new();
-    // Budget is counted in characters that will actually be shown, not in
-    // source characters: one control character can render as six, so counting
-    // the source would let a key of control characters blow the limit.
-    let mut remaining = MAX_DIAGNOSTIC_PATH;
+    let mut truncated = false;
+
     for (index, segment) in path.iter().enumerate() {
-        if index > 0 {
-            if remaining <= 1 {
-                out.push('…');
-                break;
-            }
-            out.push('.');
-            remaining -= 1;
-        }
-        push_diagnostic_segment(&mut out, segment, &mut remaining);
-        if remaining <= 1 {
-            out.push('…');
+        // A separator costs one character, and only exists between segments.
+        let separator = usize::from(index > 0);
+        // `push_diagnostic_segment` needs `separator + 2` in the worst case (a
+        // quoted, empty key); if that does not fit, stop before writing rather
+        // than writing and discovering it afterwards.
+        if budget < separator + 2 {
+            truncated = true;
             break;
         }
+        if index > 0 {
+            out.push('.');
+            budget -= 1;
+        }
+        if !push_diagnostic_segment(&mut out, segment, &mut budget) {
+            truncated = true;
+            break;
+        }
+    }
+
+    if truncated {
+        out.push('…');
     }
     out
 }
 
-/// Render one key, spending at most `remaining` characters of the caller's
-/// budget. Quotes and the truncation ellipsis are charged to the same budget.
-fn push_diagnostic_segment(out: &mut String, segment: &str, remaining: &mut usize) {
+/// Render one key into `out`, spending at most `budget` characters of it.
+///
+/// Returns `false` when the key did not fit and was truncated. The caller's
+/// budget is decremented by exactly what was written, so it can never go
+/// negative: every write is preceded by a check that it fits.
+fn push_diagnostic_segment(out: &mut String, segment: &str, budget: &mut usize) -> bool {
     let plain = segment
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | ':' | '@'));
-    // A key is never allowed more than `MAX_DIAGNOSTIC_KEY` rendered
-    // characters, and never more than what the whole-path budget has left.
-    let allowance = (*remaining).min(MAX_DIAGNOSTIC_KEY);
-    if plain {
-        let (text, spent) = render_key_chars(segment, allowance);
-        out.push_str(&text);
-        *remaining -= spent;
-        return;
+
+    // Quotes are two of the characters this key is allowed, so they come out of
+    // the key's own allowance before any of its text does.
+    let quotes = if plain { 0 } else { 2 };
+    if *budget < quotes {
+        return false;
     }
-    // Quote it, as `display_edit_path` does, so a key containing a dot cannot
-    // read as two extra levels of nesting.
-    out.push('"');
-    *remaining -= 1;
-    // One more character is reserved for the closing quote.
-    let allowance = allowance.saturating_sub(2);
-    let (text, spent) = render_key_chars(segment, allowance);
+    let allowance = (*budget).min(MAX_DIAGNOSTIC_KEY);
+    let text_allowance = allowance.saturating_sub(quotes);
+
+    if !plain {
+        out.push('"');
+        *budget -= 1;
+    }
+    let (text, spent, complete) = render_key_chars(segment, text_allowance);
     out.push_str(&text);
-    out.push('"');
-    *remaining -= spent + 1;
+    *budget -= spent;
+    if !plain {
+        out.push('"');
+        *budget -= 1;
+    }
+    complete
 }
 
 /// Render as much of `key` as fits in `allowance` rendered characters.
 ///
-/// Returns the text and how many rendered characters it costs, so the caller
-/// can keep an exact budget: a control character renders as up to six
-/// characters (`\u{1}`), which is why counting source characters would be
-/// wrong.
-fn render_key_chars(key: &str, allowance: usize) -> (String, usize) {
+/// Returns the text, how many rendered characters it costs, and whether the
+/// whole key fit. A control character renders as up to six characters
+/// (`\u{1}`), which is why counting source characters would be wrong.
+fn render_key_chars(key: &str, allowance: usize) -> (String, usize, bool) {
     let mut out = String::new();
     let mut spent = 0;
     for c in key.chars() {
@@ -229,17 +244,12 @@ fn render_key_chars(key: &str, allowance: usize) -> (String, usize) {
         };
         let cost = rendered.chars().count();
         if spent + cost > allowance {
-            // Truncated: mark it, if there is room for the mark.
-            if spent < allowance {
-                out.push('…');
-                spent += 1;
-            }
-            return (out, spent);
+            return (out, spent, false);
         }
         spent += cost;
         out.push_str(&rendered);
     }
-    (out, spent)
+    (out, spent, true)
 }
 
 /// At most `MAX_REPORTED_FIELD_ERRORS` field sentences, plus a count of the rest.
@@ -4046,5 +4056,92 @@ fn rollback_error_message(
             "{message} Automatic rollback was not completed ({reason}); the restrictive backup was retained at {}.",
             display_path(backup_path)
         ),
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_path_tests {
+    use super::{display_diagnostic_path, MAX_DIAGNOSTIC_KEY, MAX_DIAGNOSTIC_PATH};
+
+    fn len(path: &[&str]) -> usize {
+        display_diagnostic_path(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .chars()
+            .count()
+    }
+
+    /// The invariant the whole budget exists for: never longer than the cap,
+    /// whatever the keys contain.
+    fn assert_within_cap(path: &[&str]) -> String {
+        let rendered =
+            display_diagnostic_path(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(
+            rendered.chars().count() <= MAX_DIAGNOSTIC_PATH,
+            "a diagnostic path must never exceed {MAX_DIAGNOSTIC_PATH} characters, \
+             got {} for {rendered:?}",
+            rendered.chars().count()
+        );
+        rendered
+    }
+
+    #[test]
+    fn a_budget_that_ends_exactly_on_the_cap_does_not_overflow() {
+        // One plain key filling every character the path is allowed: no
+        // ellipsis is needed and none may be added.
+        let exact = "k".repeat(MAX_DIAGNOSTIC_PATH);
+        let rendered = assert_within_cap(&[exact.as_str()]);
+        assert_eq!(rendered.chars().count(), MAX_DIAGNOSTIC_PATH);
+        assert!(!rendered.ends_with('…'));
+
+        // One character more, and it must be truncated with the ellipsis still
+        // inside the cap rather than appended past it.
+        let over = "k".repeat(MAX_DIAGNOSTIC_PATH + 1);
+        let rendered = assert_within_cap(&[over.as_str()]);
+        assert!(rendered.ends_with('…'), "expected truncation: {rendered:?}");
+
+        // A quoted key has to pay for its quotes out of the same budget. This
+        // is the case the old code underflowed on: the name is one character
+        // longer than would leave room for two quotes.
+        let quoted_exact = format!("{}.", "k".repeat(MAX_DIAGNOSTIC_PATH - 3));
+        let _ = assert_within_cap(&[quoted_exact.as_str()]);
+    }
+
+    #[test]
+    fn many_short_segments_stop_before_overflowing() {
+        // Enough segments that the whole path cannot fit; the result must still
+        // respect the cap and end with a truncation mark.
+        let segments: Vec<String> = (0..MAX_DIAGNOSTIC_PATH).map(|i| format!("s{i}")).collect();
+        let rendered = assert_within_cap(&segments.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        assert!(rendered.ends_with('…'), "expected truncation: {rendered:?}");
+    }
+
+    #[test]
+    fn a_key_of_control_characters_cannot_blow_the_cap() {
+        // Each control character renders as several characters, so a key that
+        // is short in source is long on screen. The cap must be on what shows.
+        let control = "\u{1}".repeat(MAX_DIAGNOSTIC_KEY * 4);
+        let rendered = assert_within_cap(&[control.as_str()]);
+        assert!(
+            !rendered.chars().any(|c| c.is_control()),
+            "no raw control character may be emitted: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\\u{1}"),
+            "escapes must be visible: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_plain_path_is_unchanged_and_readable() {
+        // The safety work must not make ordinary paths unreadable: no quotes
+        // where none are needed, dots between segments.
+        assert_eq!(len(&["providers", "acme", "models", "m", "limit"]), 29);
+        // A dotted model id is quoted so it stays one segment, not three.
+        let dotted = display_diagnostic_path(
+            &["providers", "acme", "models", "gpt-4.1", "limit"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(dotted, r#"providers.acme.models."gpt-4.1".limit"#);
     }
 }
